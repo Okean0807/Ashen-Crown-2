@@ -1,0 +1,6 @@
+{
+  "name": "Ashen Crown",
+  "description": "An isometric dark-fantasy real-time strategy and RPG prototype where you command a hero, build a settlement, gather resources, and defeat the Orc encampment.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
