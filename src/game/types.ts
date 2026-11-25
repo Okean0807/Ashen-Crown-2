@@ -1,5 +1,7 @@
 export type GameScreen = 'TITLE' | 'PLAYING' | 'PAUSED' | 'VICTORY' | 'DEFEAT';
 
+import type { DamageType, EquipSlotId, FormationType, ItemCategory } from '../core/types';
+
 export type Faction = 'human' | 'orc';
 
 export type TerrainType =
@@ -24,7 +26,8 @@ export type PropKind =
   | 'chest'
   | 'campfire'
   | 'orc_totem'
-  | 'bindstone';
+  | 'bindstone'
+  | 'portal';
 
 export interface Tile {
   gx: number;
@@ -38,6 +41,7 @@ export interface Tile {
   resourceAmount?: number;
   maxResource?: number;
   chestLooted?: boolean;
+  chestObjectId?: string;
   regionTag?: 'settlement' | 'forest' | 'river' | 'ruins' | 'orc_camp';
 }
 
@@ -46,6 +50,7 @@ export type UnitType =
   | 'laborer'
   | 'swordsman'
   | 'archer'
+  | 'skeleton_minion'
   | 'orc_warrior'
   | 'orc_archer'
   | 'orc_commander';
@@ -57,7 +62,9 @@ export type UnitOrderType =
   | 'attack_unit'
   | 'attack_building'
   | 'gather'
-  | 'follow_hero';
+  | 'follow_hero'
+  | 'patrol'
+  | 'interact';
 
 export type EquipSlot = 'weapon' | 'armor' | 'relic';
 
@@ -106,21 +113,31 @@ export interface Unit {
   targetY?: number;
   targetUnitId?: string;
   targetBuildingId?: string;
+  waypoints?: Array<{ x: number; y: number }>;
+  patrolLoop?: boolean;
   gatherGx?: number;
   gatherGy?: number;
   gatherTimer?: number;
+  interactGx?: number;
+  interactGy?: number;
+  interactKind?: 'chest' | 'bindstone' | 'portal';
   carryingKind?: ResourceKind;
   carryingAmount?: number;
   animTime: number;
   attackAnimTimer: number;
+  castAnimTimer?: number;
   hitFlashTimer: number;
-  // Hero RPG fields
+  // Hero RPG & v14.2 fields
   level?: number;
   xp?: number;
   xpToNext?: number;
+  mana?: number;
+  maxMana?: number;
   cleaveCooldown?: number;
   rallyCooldown?: number;
-  deadTimer?: number; // for Hero bindstone respawn
+  deadTimer?: number; // for Hero Stone of Souls respawn (§288: 120s)
+  minionId?: string; // linked to MapInstanceState.necromancyMinions (§105/§107)
+  dormant?: boolean;
   aiRole?: 'guard' | 'patrol' | 'raider' | 'boss';
   homeX?: number;
   homeY?: number;
@@ -163,9 +180,10 @@ export interface Projectile {
   targetUnitId?: string;
   targetBuildingId?: string;
   damage: number;
+  damageType?: DamageType;
   progress: number;
   duration: number;
-  kind: 'arrow' | 'bolt' | 'orc_arrow';
+  kind: 'arrow' | 'bolt' | 'orc_arrow' | 'fireball' | 'necrotic_orb';
 }
 
 export interface Particle {
@@ -179,7 +197,7 @@ export interface Particle {
   maxLife: number;
   size: number;
   color: string;
-  kind: 'spark' | 'blood' | 'wood' | 'gold' | 'smoke' | 'magic' | 'ring';
+  kind: 'spark' | 'blood' | 'wood' | 'gold' | 'smoke' | 'magic' | 'ring' | 'rune_pillar';
 }
 
 export interface FloatingText {
@@ -224,6 +242,95 @@ export interface ScenarioStats {
 
 export type MobileActionMode = 'smart' | 'move' | 'attack' | 'select_box';
 
+export interface ActiveLootWindowState {
+  objectId: string;
+  tileGx: number;
+  tileGy: number;
+  titleRu: string;
+  entries: Array<{
+    entryId: string;
+    kind: 'copper' | 'item';
+    labelRu: string;
+    amount: number;
+    taken: boolean;
+  }>;
+}
+
+export interface CoreEquippedSlotView {
+  slot: EquipSlotId;
+  labelRu: string;
+  group: 'weapon' | 'armor' | 'relic';
+  instanceId: string | null;
+  definitionId: string | null;
+  nameRu: string | null;
+  bonusesRu: string;
+  category: ItemCategory | null;
+  rarity: 'common' | 'rare' | 'epic';
+}
+
+export interface CoreInventoryItemView {
+  instanceId: string;
+  definitionId: string;
+  nameRu: string;
+  category: ItemCategory;
+  group: 'weapon' | 'armor' | 'relic' | 'scroll' | 'special';
+  quantity: number;
+  targetSlot: EquipSlotId | null;
+  canEquip: boolean;
+  unmetReasonsRu: string[];
+  isScroll: boolean;
+  isQuestProtected: boolean;
+  bonusesRu: string;
+  rarity: 'common' | 'rare' | 'epic';
+}
+
+export interface CombatLogEntry {
+  id: number;
+  text: string;
+  kind: 'hit' | 'miss' | 'block' | 'spell' | 'heal' | 'kill' | 'system';
+}
+
+export interface HudV14CoreSummary {
+  buildVersion: string;
+  heroMana: number;
+  heroMaxMana: number;
+  manaRegenPerSec: number;
+  magicStrainIndex: number;
+  magicStrainStatus: 'normal' | 'elevated' | 'critical';
+  specializationRu: string;
+  unspentTotal: number;
+  currencyTextRu: string;
+  settlementIron: number;
+  settlementFood: number;
+  settlementRunePower: number;
+  activeMinionsCount: number;
+  dormantMinionsCount: number;
+  residualAutonomyPool: number;
+  canUseFormation: boolean;
+  formationReasonRu?: string;
+  activeFormation: FormationType;
+  controlGroupCounts: Record<1 | 2 | 3 | 4 | 5 | 6, number>;
+  spells: Array<{
+    spellId: string;
+    nameRu: string;
+    hotkey: string;
+    manaCost: number;
+    learned: boolean;
+    canCast: boolean;
+    school: string;
+  }>;
+  activeLootWindow: ActiveLootWindowState | null;
+  avatarRespawnSec: number;
+  rendererMode: 'webgl3d' | 'canvas2d';
+  coreEquipment: CoreEquippedSlotView[];
+  corePartyInventory: CoreInventoryItemView[];
+  combatLog: CombatLogEntry[];
+  inCombat: boolean;
+  bindstoneActive: boolean;
+  hasManualSave: boolean;
+  hasAutoSave: boolean;
+}
+
 export interface HudSnapshot {
   screen: GameScreen;
   resources: Resources;
@@ -243,6 +350,7 @@ export interface HudSnapshot {
   cameraZoom: number;
   bannerMessage: string | null;
   hasSavedGame: boolean;
+  v14Core?: HudV14CoreSummary;
 }
 
 export interface BuildingBlueprint {
@@ -275,60 +383,60 @@ export interface UnitBlueprint {
 export const BUILDING_BLUEPRINTS: Record<string, BuildingBlueprint> = {
   town_hall: {
     type: 'town_hall',
-    name: 'Town Hall',
+    name: 'Ратуша',
     size: 2,
     cost: { gold: 0, wood: 0, stone: 0 },
     maxHp: 900,
     buildTime: 10,
-    description: 'Central keep. Trains Laborers & houses the Bindstone.',
+    description: 'Центр поселения. Обучает рабочих и хранит Камень Душ.',
     trains: ['laborer'],
     popBonus: 10,
   },
   barracks: {
     type: 'barracks',
-    name: 'Barracks',
+    name: 'Казармы',
     size: 2,
     cost: { gold: 40, wood: 90, stone: 40 },
     maxHp: 560,
     buildTime: 8,
-    description: 'Recruits armored Swordsmen for frontline combat.',
+    description: 'Готовит бронированных мечников для ближнего боя.',
     trains: ['swordsman'],
   },
   archer_range: {
     type: 'archer_range',
-    name: 'Archer Range',
+    name: 'Стрельбище',
     size: 2,
     cost: { gold: 40, wood: 85, stone: 20 },
     maxHp: 440,
     buildTime: 7,
-    description: 'Trains hooded Archers with long-range bows.',
+    description: 'Обучает метких лучников для поддержки с дистанции.',
     trains: ['archer'],
   },
   farm: {
     type: 'farm',
-    name: 'Farmstead',
+    name: 'Ферма',
     size: 2,
     cost: { gold: 20, wood: 55, stone: 0 },
     maxHp: 320,
     buildTime: 5,
-    description: 'Increases maximum army population by +6.',
+    description: 'Увеличивает максимальный предел отряда на +6.',
     popBonus: 6,
   },
   tower: {
     type: 'tower',
-    name: 'Watchtower',
+    name: 'Дозорная башня',
     size: 1,
     cost: { gold: 30, wood: 50, stone: 70 },
     maxHp: 480,
     buildTime: 6,
-    description: 'Automated stone tower firing bolts at nearby Orcs.',
+    description: 'Укреплённая каменная башня, обстреливающая ближайших врагов.',
   },
 };
 
 export const UNIT_BLUEPRINTS: Record<UnitType, UnitBlueprint> = {
   hero: {
     type: 'hero',
-    name: 'Aldric, Ashen Knight',
+    name: 'Аватар',
     cost: { gold: 0, wood: 0, stone: 0 },
     trainTime: 0,
     maxHp: 340,
@@ -338,11 +446,11 @@ export const UNIT_BLUEPRINTS: Record<UnitType, UnitBlueprint> = {
     speed: 3.7,
     atkCooldown: 0.95,
     isRanged: false,
-    description: 'Heroic commander. Gains XP, equips gear, and cleaves foes.',
+    description: 'Предводитель отряда. Получает опыт, носит снаряжение и владеет магией.',
   },
   laborer: {
     type: 'laborer',
-    name: 'Laborer',
+    name: 'Рабочий',
     cost: { gold: 40, wood: 0, stone: 0 },
     trainTime: 4,
     maxHp: 90,
@@ -352,11 +460,11 @@ export const UNIT_BLUEPRINTS: Record<UnitType, UnitBlueprint> = {
     speed: 3.1,
     atkCooldown: 1.3,
     isRanged: false,
-    description: 'Gathers Wood, Gold & Stone and assists construction.',
+    description: 'Добывает древесину, руду и камень, возводит постройки поселения.',
   },
   swordsman: {
     type: 'swordsman',
-    name: 'Swordsman',
+    name: 'Мечник',
     cost: { gold: 55, wood: 20, stone: 0 },
     trainTime: 5,
     maxHp: 175,
@@ -366,11 +474,11 @@ export const UNIT_BLUEPRINTS: Record<UnitType, UnitBlueprint> = {
     speed: 3.25,
     atkCooldown: 1.05,
     isRanged: false,
-    description: 'Stalwart steel-clad infantry with broadsword and shield.',
+    description: 'Стойкий пехотинец в стальных латах с мечом и щитом.',
   },
   archer: {
     type: 'archer',
-    name: 'Archer',
+    name: 'Лучник',
     cost: { gold: 50, wood: 35, stone: 0 },
     trainTime: 5,
     maxHp: 105,
@@ -380,11 +488,25 @@ export const UNIT_BLUEPRINTS: Record<UnitType, UnitBlueprint> = {
     speed: 3.4,
     atkCooldown: 1.25,
     isRanged: true,
-    description: 'Longbow marksman supporting the line from afar.',
+    description: 'Дальнобойный стрелок, прикрывающий строй с расстояния.',
+  },
+  skeleton_minion: {
+    type: 'skeleton_minion',
+    name: 'Скелет-воин',
+    cost: { gold: 0, wood: 0, stone: 0 },
+    trainTime: 0,
+    maxHp: 120,
+    atk: 14,
+    armor: 2,
+    range: 1.35,
+    speed: 3.15,
+    atkCooldown: 1.15,
+    isRanged: false,
+    description: 'Призванный некромантией воин. Поддерживается маной Аватара.',
   },
   orc_warrior: {
     type: 'orc_warrior',
-    name: 'Orc Warrior',
+    name: 'Воин врага',
     cost: { gold: 0, wood: 0, stone: 0 },
     trainTime: 6,
     maxHp: 150,
@@ -394,11 +516,11 @@ export const UNIT_BLUEPRINTS: Record<UnitType, UnitBlueprint> = {
     speed: 2.95,
     atkCooldown: 1.15,
     isRanged: false,
-    description: 'Ferocious iron-jawed brute wielding a heavy cleaver.',
+    description: 'Свирепый боец передовой с тяжёлой секирой.',
   },
   orc_archer: {
     type: 'orc_archer',
-    name: 'Orc Skirmisher',
+    name: 'Стрелок врага',
     cost: { gold: 0, wood: 0, stone: 0 },
     trainTime: 6,
     maxHp: 95,
@@ -408,11 +530,11 @@ export const UNIT_BLUEPRINTS: Record<UnitType, UnitBlueprint> = {
     speed: 3.1,
     atkCooldown: 1.35,
     isRanged: true,
-    description: 'Cunning bone-bow archer of the Orc warband.',
+    description: 'Меткий застрельщик вражеского гарнизона с костяным луком.',
   },
   orc_commander: {
     type: 'orc_commander',
-    name: 'Warchief Grimgor',
+    name: 'Командир врага',
     cost: { gold: 0, wood: 0, stone: 0 },
     trainTime: 0,
     maxHp: 620,
@@ -422,69 +544,69 @@ export const UNIT_BLUEPRINTS: Record<UnitType, UnitBlueprint> = {
     speed: 2.8,
     atkCooldown: 1.1,
     isRanged: false,
-    description: 'Ruthless commander of the Orc encampment.',
+    description: 'Закалённый предводитель вражеской крепости.',
   },
 };
 
 export const ITEM_CATALOG: Record<string, ItemDef> = {
   iron_blade: {
     id: 'iron_blade',
-    name: 'Knight’s Broadsword',
+    name: 'Рыцарский меч',
     slot: 'weapon',
     rarity: 'common',
     bonusAtk: 5,
-    description: '+5 Attack Damage',
+    description: '+5 к атаке',
   },
   leather_hauberk: {
     id: 'leather_hauberk',
-    name: 'Ashen Brigandine',
+    name: 'Пепельная бригантина',
     slot: 'armor',
     rarity: 'common',
     bonusHp: 40,
     bonusArmor: 2,
-    description: '+40 Max HP, +2 Armor',
+    description: '+40 макс. здоровья, +2 к броне',
   },
   runed_claymore: {
     id: 'runed_claymore',
-    name: 'Runed Claymore',
+    name: 'Рунный клеймор',
     slot: 'weapon',
     rarity: 'rare',
     bonusAtk: 14,
-    description: '+14 Attack Damage',
+    description: '+14 к атаке',
   },
   crown_plate: {
     id: 'crown_plate',
-    name: 'Royal Bastion Plate',
+    name: 'Королевские латы бастиона',
     slot: 'armor',
     rarity: 'epic',
     bonusHp: 110,
     bonusArmor: 5,
-    description: '+110 Max HP, +5 Armor',
+    description: '+110 макс. здоровья, +5 к броне',
   },
   ember_signet: {
     id: 'ember_signet',
-    name: 'Ember Crown Signet',
+    name: 'Печатка тлеющей короны',
     slot: 'relic',
     rarity: 'rare',
     bonusAtk: 7,
     bonusHp: 45,
-    description: '+7 Attack, +45 Max HP',
+    description: '+7 к атаке, +45 макс. здоровья',
   },
   ward_talisman: {
     id: 'ward_talisman',
-    name: 'Oakhaven Ward',
+    name: 'Талисман стража',
     slot: 'relic',
     rarity: 'common',
     bonusArmor: 3,
     bonusHp: 35,
-    description: '+3 Armor, +35 Max HP',
+    description: '+3 к броне, +35 макс. здоровья',
   },
   healing_draught: {
     id: 'healing_draught',
-    name: 'Crimson Draught',
+    name: 'Багровый эликсир',
     slot: 'consumable',
     rarity: 'common',
     healAmount: 140,
-    description: 'Restores 140 HP to Aldric immediately.',
+    description: 'Боевые зелья не применяются в бою',
   },
 };

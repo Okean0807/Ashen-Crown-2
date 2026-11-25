@@ -1,3 +1,7 @@
+import { DEFAULT_WORKING_ASSUMPTIONS } from '../core/config';
+import type { ControlGroupSlot } from '../core/fieldCommands';
+import type { DamageType, EquipSlotId, FormationType } from '../core/types';
+import { CoreGameBridge } from './coreBridge';
 import { sound } from './audio';
 import {
   Camera,
@@ -40,7 +44,8 @@ import {
   UnitType,
 } from './types';
 
-const SAVE_KEY = 'ashen_crown_save_v1';
+const MANUAL_SAVE_KEY = 'ashen_crown_save_v1';
+const AUTO_SAVE_KEY = 'ashen_crown_autosave_v1';
 
 interface Point {
   x: number;
@@ -48,6 +53,7 @@ interface Point {
 }
 
 export class GameEngine {
+  public core: CoreGameBridge = new CoreGameBridge();
   public screen: GameScreen = 'TITLE';
   public tiles: Tile[][] = [];
   public units: Unit[] = [];
@@ -65,7 +71,7 @@ export class GameEngine {
     armor: null,
     relic: null,
   };
-  public inventory: ItemDef[] = [ITEM_CATALOG.healing_draught];
+  public inventory: ItemDef[] = [];
 
   public stats: ScenarioStats = {
     elapsedSec: 0,
@@ -96,6 +102,8 @@ export class GameEngine {
   private idCounter = 100;
   private autoSaveTimer = 0;
   private titlePanAngle = 0;
+  private dismissedChestObjectId: string | null = null;
+  private lastCombatTime = -999;
 
   constructor() {
     this.initNewWorld(false);
@@ -106,15 +114,44 @@ export class GameEngine {
     return `${prefix}_${this.idCounter}`;
   }
 
-  public hasSavedGame(): boolean {
+  public hasManualSave(): boolean {
     try {
-      return Boolean(localStorage.getItem(SAVE_KEY));
+      return Boolean(localStorage.getItem(MANUAL_SAVE_KEY));
     } catch {
       return false;
     }
   }
 
+  public hasAutoSave(): boolean {
+    try {
+      return Boolean(localStorage.getItem(AUTO_SAVE_KEY));
+    } catch {
+      return false;
+    }
+  }
+
+  public hasSavedGame(): boolean {
+    return this.hasManualSave() || this.hasAutoSave();
+  }
+
+  public isPlayerInActiveCombat(): boolean {
+    if (this.time - this.lastCombatTime < 4.5) return true;
+    const livingOrcs = this.units.filter(
+      (u) => u.faction === 'orc' && (!u.deadTimer || u.deadTimer <= 0)
+    );
+    if (livingOrcs.length === 0) return false;
+    for (const h of this.units) {
+      if (h.faction !== 'human' || (h.deadTimer && h.deadTimer > 0) || h.dormant) continue;
+      if (h.order === 'attack_unit' || h.order === 'attack_building') return true;
+      for (const o of livingOrcs) {
+        if (distGrid(h.x, h.y, o.x, o.y) <= 4.2) return true;
+      }
+    }
+    return false;
+  }
+
   public initNewWorld(startPlaying: boolean) {
+    this.core.reset();
     const world = generateScenarioWorld();
     this.tiles = world.tiles;
     this.units = world.units;
@@ -124,7 +161,12 @@ export class GameEngine {
     this.floatingTexts = [];
     this.unitPaths.clear();
 
-    this.resources = { gold: 130, wood: 110, stone: 60 };
+    const settlement = this.core.sandbox.activeMap.localSettlements.settlement_sector_a;
+    this.resources = {
+      gold: Math.max(130, settlement?.localResources.iron ?? 130),
+      wood: Math.max(110, settlement?.localResources.wood ?? 110),
+      stone: Math.max(60, settlement?.localResources.stone ?? 60),
+    };
     this.selectedUnitIds = new Set(['u_hero']);
     this.selectedBuildingId = null;
     this.equipment = {
@@ -132,7 +174,8 @@ export class GameEngine {
       armor: null,
       relic: null,
     };
-    this.inventory = [ITEM_CATALOG.healing_draught];
+    // §140.1 & §242: универсальные боевые зелья HP/Mana запрещены
+    this.inventory = [];
 
     this.stats = {
       elapsedSec: 0,
@@ -141,7 +184,7 @@ export class GameEngine {
       gatheredGold: 0,
       gatheredStone: 0,
       barracksBuilt: false,
-      swordsmenRecruited: 1, // Starting with 1 swordsman counts? Wait: objective says "Recruit five swordsmen" -> let's count recruited or total swordsmen! Let's track newly recruited OR total swordsmen >= 5. Actually starting with 0 recruited and counting each trained swordsman (or let's set starting swordsman to 0 recruited so player recruits 5, OR count total swordsmen owned up to 5 - 1 = 4 more!). Even cleaner: start with 1 Swordsman and count `swordsmenRecruited` for each newly trained Swordsman OR total Swordsmen owned! Let's count each recruited Swordsman, and show `0/5` cleanly.
+      swordsmenRecruited: 0,
       orcCampDiscovered: false,
       commanderDefeated: false,
       orcsSlain: 0,
@@ -149,11 +192,16 @@ export class GameEngine {
       nextRaidTimer: 72,
       raidCount: 0,
     };
-    this.stats.swordsmenRecruited = 0;
 
     this.buildMode = null;
     this.mobileMode = 'smart';
     this.hitstopTimer = 0;
+    this.dismissedChestObjectId = null;
+    this.lastCombatTime = -999;
+
+    // Синхронизируем стартовые параметры Аватара из доменного ядра v14.2
+    this.core.syncAvatarToSceneUnit(this.getHero());
+    this.syncSelectionToCore();
 
     // Focus camera on Human settlement
     const focus = gridToWorld(10, 30, 1);
@@ -162,7 +210,7 @@ export class GameEngine {
 
     if (startPlaying) {
       this.screen = 'PLAYING';
-      this.showBanner('The First Settlement — Explore the forest & gather resources');
+      this.showBanner('Сектор I — Исследуйте лес, добудьте ресурсы и разгромите лагерь врага');
     } else {
       this.screen = 'TITLE';
     }
@@ -173,9 +221,20 @@ export class GameEngine {
     this.bannerTimer = duration;
   }
 
-  public saveGame(): boolean {
+  public saveGame(mode: 'manual' | 'auto' = 'manual'): boolean {
+    if (mode === 'manual') {
+      const check = this.core.canSaveNow(this.isPlayerInActiveCombat());
+      if (!check.allowed) {
+        this.showBanner(check.reasonRu ?? 'Сохранение недоступно во время боя', 3.2);
+        return false;
+      }
+    }
     try {
       const payload = {
+        saveFormatVersion: 3,
+        saveKind: mode,
+        savedAtIso: new Date().toISOString(),
+        coreSnapshotJson: this.core.exportCoreSnapshotJson(),
         resources: this.resources,
         stats: this.stats,
         equipment: this.equipment,
@@ -183,6 +242,9 @@ export class GameEngine {
         units: this.units,
         buildings: this.buildings,
         camera: this.camera,
+        controlGroups: this.core.fieldSelection.controlGroups,
+        activeFormation: this.core.activeFormation,
+        idCounter: this.idCounter,
         tileUpdates: this.tiles.flatMap((row) =>
           row
             .filter((t) => t.fog > 0 || t.chestLooted || t.resourceAmount !== t.maxResource)
@@ -197,20 +259,30 @@ export class GameEngine {
             }))
         ),
       };
-      localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
-      this.showBanner('Campaign saved');
+      const targetKey = mode === 'manual' ? MANUAL_SAVE_KEY : AUTO_SAVE_KEY;
+      localStorage.setItem(targetKey, JSON.stringify(payload));
+      if (mode === 'manual') {
+        this.showBanner('Кампания сохранена');
+      }
       return true;
     } catch {
       return false;
     }
   }
 
-  public loadGame(): boolean {
+  private tryLoadFromStorageKey(storageKey: string): boolean {
     try {
-      const raw = localStorage.getItem(SAVE_KEY);
+      const raw = localStorage.getItem(storageKey);
       if (!raw) return false;
       const data = JSON.parse(raw);
       const fresh = generateScenarioWorld();
+      this.core.reset();
+      if (typeof data.coreSnapshotJson === 'string') {
+        const imported = this.core.importCoreSnapshotJson(data.coreSnapshotJson);
+        if (!imported) {
+          return false;
+        }
+      }
       this.tiles = fresh.tiles;
       if (Array.isArray(data.tileUpdates)) {
         for (const tu of data.tileUpdates) {
@@ -221,15 +293,34 @@ export class GameEngine {
             tile.resourceAmount = tu.resourceAmount;
             tile.prop = tu.prop;
             tile.walkable = tu.walkable;
+            const idx = tile.gy * MAP_SIZE + tile.gx;
+            if (idx >= 0 && idx < this.core.fogGrid.tiles.length) {
+              this.core.fogGrid.tiles[idx] =
+                tu.fog === 2 ? 'Visible' : tu.fog === 1 ? 'ExploredShrouded' : 'Unexplored';
+            }
           }
         }
       }
       this.resources = data.resources ?? this.resources;
       this.stats = data.stats ?? this.stats;
       this.equipment = data.equipment ?? this.equipment;
-      this.inventory = data.inventory ?? this.inventory;
+      this.inventory = (data.inventory ?? []).filter(
+        (it: ItemDef) => it.slot !== 'consumable'
+      );
       this.units = data.units ?? fresh.units;
       this.buildings = data.buildings ?? fresh.buildings;
+      if (typeof data.idCounter === 'number' && data.idCounter > this.idCounter) {
+        this.idCounter = data.idCounter;
+      }
+      if (data.controlGroups && typeof data.controlGroups === 'object') {
+        for (const slot of [1, 2, 3, 4, 5, 6] as ControlGroupSlot[]) {
+          const arr = data.controlGroups[slot];
+          this.core.fieldSelection.controlGroups[slot] = Array.isArray(arr) ? [...arr] : [];
+        }
+      }
+      if (typeof data.activeFormation === 'string') {
+        this.core.activeFormation = data.activeFormation as FormationType;
+      }
       const loadedCam = data.camera;
       this.camera = loadedCam
         ? createCamera(loadedCam.x ?? 0, loadedCam.y ?? 0, loadedCam.zoom ?? DEFAULT_ZOOM)
@@ -239,16 +330,382 @@ export class GameEngine {
       this.particles = [];
       this.floatingTexts = [];
       this.unitPaths.clear();
+      this.dismissedChestObjectId = null;
+      this.lastCombatTime = -999;
       this.selectedUnitIds = new Set(['u_hero']);
       this.selectedBuildingId = null;
       this.buildMode = null;
       this.screen = 'PLAYING';
+      this.core.syncAvatarToSceneUnit(this.getHero());
+      this.syncSelectionToCore();
       this.updateFogOfWar();
-      this.showBanner('Campaign resumed');
       return true;
     } catch {
       return false;
     }
+  }
+
+  public loadGame(source: 'manual' | 'auto' | 'latest' = 'latest'): boolean {
+    const readTimestamp = (key: string): number => {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return -1;
+        const parsed = JSON.parse(raw);
+        const ts = typeof parsed.savedAtIso === 'string' ? Date.parse(parsed.savedAtIso) : 0;
+        return Number.isFinite(ts) ? ts : 0;
+      } catch {
+        return 0;
+      }
+    };
+
+    let candidates: string[] = [];
+    if (source === 'manual') {
+      candidates = [MANUAL_SAVE_KEY, AUTO_SAVE_KEY];
+    } else if (source === 'auto') {
+      candidates = [AUTO_SAVE_KEY, MANUAL_SAVE_KEY];
+    } else {
+      const mTs = readTimestamp(MANUAL_SAVE_KEY);
+      const aTs = readTimestamp(AUTO_SAVE_KEY);
+      candidates =
+        aTs > mTs ? [AUTO_SAVE_KEY, MANUAL_SAVE_KEY] : [MANUAL_SAVE_KEY, AUTO_SAVE_KEY];
+    }
+
+    let anyPresent = false;
+    for (let i = 0; i < candidates.length; i++) {
+      const key = candidates[i];
+      let exists = false;
+      try {
+        exists = Boolean(localStorage.getItem(key));
+      } catch {
+        exists = false;
+      }
+      if (!exists) continue;
+      anyPresent = true;
+      if (this.tryLoadFromStorageKey(key)) {
+        this.showBanner(i === 0 ? 'Сохранение загружено' : 'Загружено резервное сохранение');
+        return true;
+      }
+    }
+
+    if (anyPresent) {
+      this.showBanner('Повреждена контрольная сумма файла сохранения');
+    }
+    return false;
+  }
+
+  public syncFromExternalCoreMutation(): void {
+    this.core.syncAvatarToSceneUnit(this.getHero());
+  }
+
+  private getAliveHumanIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const u of this.units) {
+      if (u.faction === 'human' && (!u.deadTimer || u.deadTimer <= 0)) {
+        ids.add(u.id);
+      }
+    }
+    return ids;
+  }
+
+  private syncSelectionToCore(): void {
+    this.core.syncSelection(this.selectedUnitIds, this.getAliveHumanIds());
+  }
+
+  public assignControlGroupSlot(slot: ControlGroupSlot): void {
+    const count = this.core.assignGroup(slot, this.selectedUnitIds, this.getAliveHumanIds());
+    if (count > 0) {
+      sound.click();
+      this.showBanner(`Группа ${slot} назначена (${count})`, 2.0);
+    }
+  }
+
+  public recallControlGroupSlot(slot: ControlGroupSlot): void {
+    const ids = this.core.recallGroup(slot, this.getAliveHumanIds());
+    if (ids.length > 0) {
+      this.selectedUnitIds = new Set(ids);
+      this.selectedBuildingId = null;
+      sound.click();
+    }
+  }
+
+  public setFormation(formation: FormationType): boolean {
+    const heroId = this.getHero()?.id ?? 'u_hero';
+    const res = this.core.trySetFormation(formation, Array.from(this.selectedUnitIds), heroId);
+    if (!res.ok) {
+      this.showBanner(res.reasonRu ?? 'Формация недоступна', 2.6);
+      return false;
+    }
+    sound.click();
+    const label = formation === 'compact' ? 'Плотный строй' : formation === 'line' ? 'Линия' : 'Рассыпной строй';
+    this.showBanner(`Формация отряда: ${label}`, 2.2);
+    return true;
+  }
+
+  public castHeroSpell(spellId: string): boolean {
+    const hero = this.getHero();
+    if (!hero || (hero.deadTimer && hero.deadTimer > 0)) {
+      this.showBanner('Аватар возрождается у Камня Душ', 2.5);
+      return false;
+    }
+
+    const cast = this.core.castAvatarSpell(spellId, hero);
+    if (!cast.ok) {
+      this.showBanner(cast.reasonRu ?? 'Заклинание недоступно', 2.4);
+      return false;
+    }
+
+    hero.castAnimTimer = 0.45;
+    hero.attackAnimTimer = 0.3;
+
+    if (spellId === 'spell_elem_fire_bolt') {
+      const target = this.findNearestEnemyUnit(hero.x, hero.y, 'orc', 9.0);
+      const targetBld = !target ? this.findNearestEnemyBuilding(hero.x, hero.y, 'orc', 9.0) : null;
+      const tx = target ? target.x : targetBld ? targetBld.gx + targetBld.size * 0.5 : hero.x + hero.facing * 4.2;
+      const ty = target ? target.y : targetBld ? targetBld.gy + targetBld.size * 0.5 : hero.y - 1.5;
+
+      const dmg = Math.max(24, Math.round(cast.effectPower));
+      this.spawnProjectile(
+        'human',
+        hero.x,
+        hero.y,
+        tx,
+        ty,
+        target?.id,
+        targetBld?.id,
+        dmg,
+        'fireball',
+        'fire'
+      );
+      this.spawnParticles(hero.x, hero.y, 14, '#f97316', 'magic', 12);
+      this.particles.push({
+        x: hero.x,
+        y: hero.y,
+        z: 4,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        life: 0.36,
+        maxLife: 0.36,
+        size: 16,
+        color: '#fb923c',
+        kind: 'ring',
+      });
+      this.addFloatingText(hero.x, hero.y, `Огненный залп (-${cast.manaSpent} МП)`, '#fb923c');
+      sound.heavyHit();
+      return true;
+    }
+
+    if (spellId === 'spell_life_mend') {
+      const healPower = Math.max(30, Math.round(cast.effectPower));
+      let healedAny = 0;
+      for (const u of this.units) {
+        if (u.faction === 'human' && (!u.deadTimer || u.deadTimer <= 0)) {
+          if (distGrid(hero.x, hero.y, u.x, u.y) <= 5.5) {
+            const healed = this.core.computeCanonicalHeal(u, healPower);
+            if (healed > 0) {
+              u.hp = Math.min(u.maxHp, u.hp + healed);
+              if (u.type === 'hero') {
+                this.core.getAvatar().hp = u.hp;
+              }
+              this.addFloatingText(u.x, u.y, `+${healed} HP`, '#4ade80');
+              healedAny += healed;
+            }
+          }
+        }
+      }
+      this.particles.push({
+        x: hero.x,
+        y: hero.y,
+        z: 2,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        life: 0.65,
+        maxLife: 0.65,
+        size: 28,
+        color: '#34d399',
+        kind: 'rune_pillar',
+      });
+      this.spawnParticles(hero.x, hero.y, 18, '#4ade80', 'magic', 10);
+      sound.levelUp();
+      if (healedAny === 0) {
+        this.addFloatingText(hero.x, hero.y, 'Здоровье полное', '#86efac');
+      }
+      return true;
+    }
+
+    if (spellId === 'spell_dark_raise_skeleton') {
+      // Сначала поднимаем дремлющую нежить из Dormant_NoMana (§105.2), если она есть
+      const reraised = this.core.reraiseDormantSkeletons();
+      if (reraised > 0) {
+        for (const u of this.units) {
+          if (u.type === 'skeleton_minion' && u.dormant) {
+            u.dormant = false;
+            this.spawnParticles(u.x, u.y, 12, '#38bdf8', 'magic', 10);
+          }
+        }
+        this.showBanner(`Повторно поднято скелетов: ${reraised}`, 2.5);
+      }
+
+      const minionId = this.nextId('skel');
+      this.core.registerRaisedSkeleton(minionId);
+      const sx = clamp(hero.x + (Math.random() - 0.5) * 1.4, 1.5, MAP_SIZE - 1.5);
+      const sy = clamp(hero.y + (Math.random() - 0.5) * 1.4, 1.5, MAP_SIZE - 1.5);
+      const skel = createUnit(minionId, 'human', 'skeleton_minion', sx, sy, {
+        minionId,
+        dormant: false,
+        order: 'follow_hero',
+      });
+      this.units.push(skel);
+
+      this.particles.push({
+        x: sx,
+        y: sy,
+        z: 2,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        life: 0.7,
+        maxLife: 0.7,
+        size: 22,
+        color: '#38bdf8',
+        kind: 'rune_pillar',
+      });
+      this.spawnParticles(sx, sy, 18, '#a78bfa', 'magic', 10);
+      this.addFloatingText(sx, sy, 'Скелет призван', '#38bdf8');
+      sound.levelUp();
+      return true;
+    }
+
+    if (spellId === 'spell_elem_frost_nova') {
+      const dmg = Math.max(22, Math.round(cast.effectPower));
+      this.particles.push({
+        x: hero.x,
+        y: hero.y,
+        z: 4,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        life: 0.48,
+        maxLife: 0.48,
+        size: 32,
+        color: '#38bdf8',
+        kind: 'ring',
+      });
+      this.spawnParticles(hero.x, hero.y, 20, '#7dd3fc', 'magic', 10);
+      this.addFloatingText(hero.x, hero.y, `Кольцо холода (-${cast.manaSpent} МП)`, '#38bdf8');
+      sound.heavyHit();
+      for (const e of [...this.units]) {
+        if (e.faction === 'orc' && distGrid(hero.x, hero.y, e.x, e.y) <= 4.5) {
+          this.damageUnit(e, dmg, hero, 'cold');
+        }
+      }
+      return true;
+    }
+
+    if (spellId === 'spell_elem_spark') {
+      const target = this.findNearestEnemyUnit(hero.x, hero.y, 'orc', 9.0);
+      const targetBld = !target ? this.findNearestEnemyBuilding(hero.x, hero.y, 'orc', 9.0) : null;
+      const tx = target ? target.x : targetBld ? targetBld.gx + targetBld.size * 0.5 : hero.x + hero.facing * 4.2;
+      const ty = target ? target.y : targetBld ? targetBld.gy + targetBld.size * 0.5 : hero.y - 1.2;
+      const dmg = Math.max(20, Math.round(cast.effectPower));
+      this.spawnProjectile(
+        'human',
+        hero.x,
+        hero.y,
+        tx,
+        ty,
+        target?.id,
+        targetBld?.id,
+        dmg,
+        'bolt',
+        'lightning'
+      );
+      this.spawnParticles(hero.x, hero.y, 12, '#fde047', 'spark', 10);
+      this.addFloatingText(hero.x, hero.y, `Искра (-${cast.manaSpent} МП)`, '#fde047');
+      sound.arrowShot();
+      return true;
+    }
+
+    return true;
+  }
+
+  public takeLootEntry(entryId: string): void {
+    const res = this.core.takeChestEntry(entryId, this.tiles);
+    if (res.ok) {
+      sound.gather();
+      if (res.copperGained > 0) {
+        const goldUnits = Math.max(10, Math.round(res.copperGained / 10));
+        this.resources.gold += goldUnits;
+        this.stats.gatheredGold += goldUnits;
+      }
+      if (res.allTaken) {
+        this.grantHeroXp(45, 'chest_ruin_loot');
+      }
+    }
+  }
+
+  public takeAllLoot(): void {
+    const res = this.core.takeAllChestEntries(this.tiles);
+    if (res.ok) {
+      sound.levelUp();
+      if (res.copperGained > 0) {
+        const goldUnits = Math.max(15, Math.round(res.copperGained / 10));
+        this.resources.gold += goldUnits;
+        this.stats.gatheredGold += goldUnits;
+      }
+      if (res.takenCount > 0) {
+        this.grantHeroXp(45, 'chest_ruin_loot');
+        this.showBanner(`Собрано трофеев: ${res.takenCount}`, 2.5);
+      }
+    }
+  }
+
+  public closeLootWindow(): void {
+    this.dismissedChestObjectId = this.core.activeLootWindow?.objectId ?? null;
+    this.core.activeLootWindow = null;
+  }
+
+  public equipCoreItem(instanceId: string): boolean {
+    const hero = this.getHero();
+    if (!hero || (hero.deadTimer && hero.deadTimer > 0)) {
+      this.showBanner('Аватар возрождается и не может сменить снаряжение', 2.6);
+      return false;
+    }
+    const res = this.core.equipCoreInventoryItem(instanceId, hero);
+    if (!res.ok) {
+      this.showBanner(res.reasonRu ?? 'Требования предмета не выполнены', 3.0);
+      return false;
+    }
+    sound.click();
+    this.addFloatingText(hero.x, hero.y, `Экипировано: ${res.itemNameRu ?? 'Предмет'}`, '#facc15');
+    return true;
+  }
+
+  public unequipCoreSlot(slot: EquipSlotId): boolean {
+    const hero = this.getHero();
+    if (!hero || (hero.deadTimer && hero.deadTimer > 0)) return false;
+    const res = this.core.unequipCoreEquipmentSlot(slot, hero);
+    if (!res.ok) {
+      this.showBanner(res.reasonRu ?? 'Не удалось снять предмет', 2.4);
+      return false;
+    }
+    sound.click();
+    return true;
+  }
+
+  public transcribeCoreScroll(instanceId: string): boolean {
+    const hero = this.getHero();
+    if (!hero || (hero.deadTimer && hero.deadTimer > 0)) return false;
+    const res = this.core.useCoreSpellScroll(instanceId, hero);
+    if (!res.ok) {
+      this.showBanner(res.reasonRu ?? 'Не удалось изучить свиток', 3.0);
+      return false;
+    }
+    sound.levelUp();
+    this.addFloatingText(hero.x, hero.y, `Изучено: ${res.spellNameRu ?? 'Заклинание'}`, '#38bdf8');
+    this.showBanner(`Формула «${res.spellNameRu ?? 'Заклинание'}» перенесена в Гримуар`, 3.2);
+    return true;
   }
 
   public getHero(): Unit | null {
@@ -271,13 +728,12 @@ export class GameEngine {
     if (u.type !== 'hero') {
       return { atk: u.baseAtk, armor: u.baseArmor, maxHp: u.maxHp };
     }
-    const lvl = u.level ?? 1;
-    let atk = u.baseAtk + (lvl - 1) * 4;
-    let armor = u.baseArmor + (lvl - 1) * 1;
-    let maxHp = UNIT_BLUEPRINTS.hero.maxHp + (lvl - 1) * 45;
+    let atk = u.baseAtk;
+    let armor = u.baseArmor;
+    let maxHp = u.maxHp;
     for (const slot of ['weapon', 'armor', 'relic'] as EquipSlot[]) {
       const item = this.equipment[slot];
-      if (item) {
+      if (item && item.id !== 'iron_blade') {
         atk += item.bonusAtk ?? 0;
         armor += item.bonusArmor ?? 0;
         maxHp += item.bonusHp ?? 0;
@@ -292,13 +748,14 @@ export class GameEngine {
     if (!item || !hero || (hero.deadTimer && hero.deadTimer > 0)) return;
 
     if (item.slot === 'consumable') {
-      const stats = this.getUnitEffectiveStats(hero);
-      hero.maxHp = stats.maxHp;
-      hero.hp = Math.min(hero.maxHp, hero.hp + (item.healAmount ?? 100));
-      this.inventory.splice(index, 1);
-      sound.gather();
-      this.spawnParticles(hero.x, hero.y, 12, '#4ade80', 'magic', 8);
-      this.addFloatingText(hero.x, hero.y, `+${item.healAmount ?? 100} HP`, '#4ade80');
+      if (this.core.isCombatPotionBlocked('hp_potion')) {
+        this.showBanner(
+          'Боевые зелья здоровья и маны в бою не применяются. Используйте магию Жизни (G).',
+          3.5
+        );
+        sound.click();
+        return;
+      }
       return;
     }
 
@@ -314,8 +771,9 @@ export class GameEngine {
     hero.maxHp = updated.maxHp;
     if (hpDiff > 0) hero.hp = Math.min(hero.maxHp, hero.hp + hpDiff);
     else hero.hp = Math.min(hero.maxHp, hero.hp);
+    this.core.getAvatar().hp = Math.min(this.core.getAvatar().maxHp, hero.hp);
     sound.click();
-    this.addFloatingText(hero.x, hero.y, `Equipped ${item.name}`, '#facc15');
+    this.addFloatingText(hero.x, hero.y, `Экипировано: ${item.name}`, '#facc15');
   }
 
   public triggerHeroCleave() {
@@ -348,7 +806,7 @@ export class GameEngine {
 
     for (const e of [...this.units]) {
       if (e.faction === 'orc' && distGrid(hero.x, hero.y, e.x, e.y) <= 2.7) {
-        this.damageUnit(e, dmg, hero);
+        this.damageUnit(e, dmg, hero, 'physical');
       }
     }
     for (const b of [...this.buildings]) {
@@ -364,6 +822,7 @@ export class GameEngine {
     if ((hero.rallyCooldown ?? 0) > 0) return;
 
     hero.rallyCooldown = 14;
+    hero.castAnimTimer = 0.35;
     sound.levelUp();
     this.particles.push({
       x: hero.x,
@@ -382,9 +841,15 @@ export class GameEngine {
     for (const u of this.units) {
       if (u.faction === 'human' && (!u.deadTimer || u.deadTimer <= 0)) {
         if (distGrid(hero.x, hero.y, u.x, u.y) <= 4.8) {
-          const heal = 50;
-          u.hp = Math.min(u.maxHp, u.hp + heal);
-          this.addFloatingText(u.x, u.y, `+${heal}`, '#4ade80');
+          const heal = this.core.computeCanonicalHeal(u, 50);
+          if (heal > 0) {
+            u.hp = Math.min(u.maxHp, u.hp + heal);
+            if (u.type === 'hero') {
+              const avatar = this.core.getAvatar();
+              avatar.hp = Math.min(avatar.maxHp, u.hp);
+            }
+            this.addFloatingText(u.x, u.y, `+${heal} HP`, '#4ade80');
+          }
         }
       }
     }
@@ -453,6 +918,7 @@ export class GameEngine {
     if (hero) {
       this.selectedUnitIds = new Set([hero.id]);
       this.selectedBuildingId = null;
+      this.syncSelectionToCore();
       this.centerCameraOn(hero.x, hero.y, false);
       sound.click();
     }
@@ -463,11 +929,13 @@ export class GameEngine {
       (u) =>
         u.faction === 'human' &&
         (!u.deadTimer || u.deadTimer <= 0) &&
-        (u.type === 'hero' || u.type === 'swordsman' || u.type === 'archer')
+        !u.dormant &&
+        (u.type === 'hero' || u.type === 'swordsman' || u.type === 'archer' || u.type === 'skeleton_minion')
     );
     if (combatUnits.length > 0) {
       this.selectedUnitIds = new Set(combatUnits.map((u) => u.id));
       this.selectedBuildingId = null;
+      this.syncSelectionToCore();
       sound.click();
     }
   }
@@ -475,6 +943,7 @@ export class GameEngine {
   public selectUnitById(id: string) {
     this.selectedUnitIds = new Set([id]);
     this.selectedBuildingId = null;
+    this.syncSelectionToCore();
     sound.click();
   }
 
@@ -490,6 +959,7 @@ export class GameEngine {
     this.resources.gold -= cost.gold;
     this.resources.wood -= cost.wood;
     this.resources.stone -= cost.stone;
+    this.core.recordSettlementSpend(cost.wood, cost.stone, cost.gold);
   }
 
   public canPlaceBuildingAt(type: BuildingType, gx: number, gy: number): boolean {
@@ -519,11 +989,11 @@ export class GameEngine {
     const bp = BUILDING_BLUEPRINTS[type];
     if (!bp) return false;
     if (!this.canAfford(bp.cost)) {
-      this.showBanner('Not enough resources');
+      this.showBanner('Недостаточно ресурсов для строительства');
       return false;
     }
     if (!this.canPlaceBuildingAt(type, gx, gy)) {
-      this.showBanner('Cannot build on blocked or unexplored terrain');
+      this.showBanner('Нельзя строить на занятой или неразведанной клетке');
       return false;
     }
 
@@ -548,9 +1018,33 @@ export class GameEngine {
     this.buildMode = null;
     this.selectedBuildingId = b.id;
     this.selectedUnitIds.clear();
+    this.syncSelectionToCore();
     sound.buildPlace();
     this.spawnParticles(gx + b.size * 0.5, gy + b.size * 0.5, 14, '#d6d3d1', 'smoke', 10);
     this.updateFogOfWar();
+    return true;
+  }
+
+  public repairBuilding(buildingId: string): boolean {
+    const b = this.buildings.find((item) => item.id === buildingId);
+    if (!b || !b.constructed || b.faction !== 'human') return false;
+    if (b.hp >= b.maxHp) return false;
+
+    const woodCost = DEFAULT_WORKING_ASSUMPTIONS.buildingRepairCostWood;
+    const hpStep = DEFAULT_WORKING_ASSUMPTIONS.buildingRepairHpStep;
+    if (this.resources.wood < woodCost) {
+      this.showBanner(`Для ремонта требуется ${woodCost} древесины`, 2.6);
+      return false;
+    }
+
+    this.spend({ gold: 0, wood: woodCost, stone: 0 });
+    const prevHp = b.hp;
+    b.hp = Math.min(b.maxHp, b.hp + hpStep);
+    const healed = Math.round(b.hp - prevHp);
+    sound.buildPlace();
+    this.spawnParticles(b.gx + b.size * 0.5, b.gy + b.size * 0.5, 12, '#a3e635', 'spark', 10);
+    this.addFloatingText(b.gx + b.size * 0.5, b.gy + b.size * 0.5, `Ремонт +${healed} ОЗ`, '#86efac');
+    this.core.pushCombatLog(`Ремонт постройки: +${healed} ОЗ (-${woodCost} древесины)`, 'system');
     return true;
   }
 
@@ -565,11 +1059,11 @@ export class GameEngine {
       .filter((item) => item.faction === 'human')
       .reduce((acc, item) => acc + item.queue.length, 0);
     if (pop.used + queuedCount >= pop.cap) {
-      this.showBanner('Population cap reached — build a Farmstead');
+      this.showBanner('Достигнут лимит отряда — постройте Ферму');
       return false;
     }
     if (!this.canAfford(bp.cost)) {
-      this.showBanner('Not enough resources to recruit');
+      this.showBanner('Недостаточно ресурсов для найма');
       return false;
     }
     if (b.queue.length >= 5) return false;
@@ -577,6 +1071,9 @@ export class GameEngine {
     this.spend(bp.cost);
     b.queue.push({ unitType, remaining: bp.trainTime, total: bp.trainTime });
     sound.click();
+    if (b.hp < b.maxHp) {
+      this.showBanner('Здание повреждено: очередь на паузе до ремонта древесиной', 3.0);
+    }
     return true;
   }
 
@@ -587,13 +1084,14 @@ export class GameEngine {
       ) ?? this.units.find((u) => u.faction === 'human' && u.type === 'laborer');
 
     if (!idleLab) {
-      this.showBanner('No Laborers available — train one at the Town Hall');
+      this.showBanner('Нет доступных рабочих — наймите их в Ратуше');
       return;
     }
 
     const node = this.findNearestResource(idleLab.x, idleLab.y, kind, 40);
+    const kindRu = kind === 'wood' ? 'леса' : kind === 'gold' ? 'руды' : 'камня';
     if (!node) {
-      this.showBanner(`No ${kind} nodes discovered nearby`);
+      this.showBanner(`Поблизости не найдено месторождений (${kindRu})`);
       return;
     }
 
@@ -606,7 +1104,7 @@ export class GameEngine {
     this.selectedUnitIds = new Set([idleLab.id]);
     this.selectedBuildingId = null;
     sound.command();
-    this.addFloatingText(node.gx + 0.5, node.gy + 0.5, `Gather ${kind}`, '#facc15');
+    this.addFloatingText(node.gx + 0.5, node.gy + 0.5, `Добыча ${kindRu}`, '#facc15');
   }
 
   public issueCommandToSelected(cmd: 'stop' | 'follow_hero' | 'attack_move_forward') {
@@ -618,6 +1116,7 @@ export class GameEngine {
         u.order = 'idle';
         u.targetUnitId = undefined;
         u.targetBuildingId = undefined;
+        u.interactKind = undefined;
         this.unitPaths.delete(u.id);
       }
       sound.command();
@@ -629,7 +1128,7 @@ export class GameEngine {
         u.targetBuildingId = undefined;
       }
       sound.command();
-      this.showBanner('Units following Aldric', 2.2);
+      this.showBanner('Отряд следует за Аватаром', 2.2);
     } else if (cmd === 'attack_move_forward') {
       this.issueMoveOrAttackPoint(31, 11, true);
     }
@@ -688,6 +1187,7 @@ export class GameEngine {
         this.selectedUnitIds = new Set([hitHuman.id]);
       }
       this.selectedBuildingId = null;
+      this.syncSelectionToCore();
       sound.click();
       return;
     }
@@ -697,6 +1197,7 @@ export class GameEngine {
     if (hitBld) {
       this.selectedBuildingId = hitBld.id;
       this.selectedUnitIds.clear();
+      this.syncSelectionToCore();
       sound.click();
       return;
     }
@@ -714,6 +1215,11 @@ export class GameEngine {
         return;
       }
       const tile = this.tiles[igy]?.[igx];
+      const interactive = this.findInteractivePropAtGrid(igx, igy);
+      if (interactive) {
+        this.interactWithWorldTile(interactive);
+        return;
+      }
       if (tile && tile.resourceKind && (tile.resourceAmount ?? 0) > 0) {
         this.issueGatherTile(igx, igy);
         return;
@@ -728,10 +1234,17 @@ export class GameEngine {
     if (!shiftHeld) {
       this.selectedUnitIds.clear();
       this.selectedBuildingId = null;
+      this.syncSelectionToCore();
     }
   }
 
-  public handleWorldSecondaryClick(sx: number, sy: number, vw: number, vh: number) {
+  public handleWorldSecondaryClick(
+    sx: number,
+    sy: number,
+    vw: number,
+    vh: number,
+    modifier: 'none' | 'shift' | 'alt' = 'none'
+  ) {
     if (this.buildMode) {
       this.buildMode = null;
       sound.click();
@@ -746,6 +1259,15 @@ export class GameEngine {
     const igx = Math.floor(gx);
     const igy = Math.floor(gy);
 
+    if (modifier === 'shift') {
+      this.issueWaypointOrPatrol(gx, gy, 'waypoint');
+      return;
+    }
+    if (modifier === 'alt') {
+      this.issueWaypointOrPatrol(gx, gy, 'patrol');
+      return;
+    }
+
     const enemy = this.findUnitAtScreen(sx, sy, vw, vh, 'orc');
     if (enemy) {
       this.issueAttackUnit(enemy.id);
@@ -756,6 +1278,11 @@ export class GameEngine {
       this.issueAttackBuilding(enemyBld.id);
       return;
     }
+    const interactive = this.findInteractivePropAtGrid(igx, igy);
+    if (interactive) {
+      this.interactWithWorldTile(interactive);
+      return;
+    }
     const tile = this.tiles[igy]?.[igx];
     if (tile && tile.resourceKind && (tile.resourceAmount ?? 0) > 0) {
       this.issueGatherTile(igx, igy);
@@ -763,6 +1290,141 @@ export class GameEngine {
     }
 
     this.issueMoveOrAttackPoint(gx, gy, false);
+  }
+
+  private findInteractivePropAtGrid(igx: number, igy: number): Tile | null {
+    const isInteractive = (t: Tile | undefined): t is Tile =>
+      Boolean(
+        t &&
+          t.fog > 0 &&
+          ((t.prop === 'chest' && !t.chestLooted) ||
+            t.prop === 'bindstone' ||
+            t.prop === 'portal')
+      );
+
+    const exact = this.tiles[igy]?.[igx];
+    if (isInteractive(exact)) return exact;
+
+    const offsets = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ];
+    for (const [dx, dy] of offsets) {
+      const nb = this.tiles[igy + dy]?.[igx + dx];
+      if (isInteractive(nb)) return nb;
+    }
+    return null;
+  }
+
+  public interactWithWorldTile(tile: Tile): boolean {
+    if (
+      tile.prop !== 'chest' &&
+      tile.prop !== 'bindstone' &&
+      tile.prop !== 'portal'
+    ) {
+      return false;
+    }
+    const selected = this.getSelectedHumanUnits();
+    const heroSelected = selected.some((u) => u.type === 'hero');
+    const hero = this.getHero();
+
+    if ((tile.prop === 'bindstone' || tile.prop === 'portal') && selected.length > 0 && !heroSelected) {
+      const actorKind = selected[0].type === 'laborer' ? 'worker' : 'combat_unit';
+      const res =
+        tile.prop === 'bindstone'
+          ? this.core.interactWithBindstone(actorKind)
+          : this.core.interactWithPortal(actorKind, this.stats.commanderDefeated);
+      this.showBanner(res.messageRu, 3.0);
+      sound.click();
+      return false;
+    }
+
+    if (!hero || (hero.deadTimer && hero.deadTimer > 0)) {
+      this.showBanner('Взаимодействовать с объектом может только живой Аватар', 2.6);
+      return false;
+    }
+
+    this.dismissedChestObjectId = null;
+    hero.order = 'interact';
+    hero.interactGx = tile.gx;
+    hero.interactGy = tile.gy;
+    hero.interactKind = tile.prop;
+    hero.targetUnitId = undefined;
+    hero.targetBuildingId = undefined;
+    this.assignPathTo(hero, tile.gx + 0.5, tile.gy + 0.5, true);
+    sound.command();
+    this.particles.push({
+      x: tile.gx + 0.5,
+      y: tile.gy + 0.5,
+      z: 3,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      life: 0.45,
+      maxLife: 0.45,
+      size: 16,
+      color: tile.prop === 'chest' ? '#facc15' : '#38bdf8',
+      kind: 'ring',
+    });
+    return true;
+  }
+
+  public issueWaypointOrPatrol(gx: number, gy: number, mode: 'waypoint' | 'patrol') {
+    const selected = this.getSelectedHumanUnits();
+    if (selected.length === 0) return;
+
+    const tx = clamp(gx, 1.2, MAP_SIZE - 1.2);
+    const ty = clamp(gy, 1.2, MAP_SIZE - 1.2);
+
+    for (const u of selected) {
+      if (mode === 'patrol') {
+        u.order = 'patrol';
+        u.patrolLoop = true;
+        u.waypoints = [
+          { x: tx, y: ty },
+          { x: u.x, y: u.y },
+        ];
+        u.targetX = tx;
+        u.targetY = ty;
+        u.targetUnitId = undefined;
+        u.targetBuildingId = undefined;
+        this.assignPathTo(u, tx, ty, false);
+      } else {
+        if (!u.waypoints) u.waypoints = [];
+        u.waypoints.push({ x: tx, y: ty });
+        u.patrolLoop = false;
+        if (u.order === 'idle' || u.targetX === undefined || u.targetY === undefined) {
+          const next = u.waypoints.shift()!;
+          u.order = 'move';
+          u.targetX = next.x;
+          u.targetY = next.y;
+          this.assignPathTo(u, next.x, next.y, false);
+        }
+      }
+    }
+
+    sound.command();
+    this.particles.push({
+      x: tx,
+      y: ty,
+      z: 2,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      life: 0.45,
+      maxLife: 0.45,
+      size: 16,
+      color: mode === 'patrol' ? '#38bdf8' : '#a78bfa',
+      kind: 'ring',
+    });
+    this.addFloatingText(
+      tx,
+      ty,
+      mode === 'patrol' ? 'Патруль' : 'Маршрутная точка',
+      mode === 'patrol' ? '#38bdf8' : '#c4b5fd'
+    );
   }
 
   public handleMarqueeSelect(x0: number, y0: number, x1: number, y1: number, vw: number, vh: number) {
@@ -786,6 +1448,7 @@ export class GameEngine {
     if (picked.length > 0) {
       this.selectedUnitIds = new Set(picked);
       this.selectedBuildingId = null;
+      this.syncSelectionToCore();
       sound.click();
     }
   }
@@ -834,13 +1497,22 @@ export class GameEngine {
     const selected = this.getSelectedHumanUnits();
     if (selected.length === 0) return;
 
-    const offsets = computeFormationOffsets(selected.length);
+    const form = this.core.activeFormation;
+    const rawOffsets = computeFormationOffsets(selected.length);
+    const scale =
+      form === 'loose' ? 1.55 : form === 'compact' ? 0.85 : form === 'defensive' ? 0.92 : 1.05;
+
     selected.forEach((u, idx) => {
-      const tx = clamp(gx + offsets[idx].dx, 1.2, MAP_SIZE - 1.2);
-      const ty = clamp(gy + offsets[idx].dy, 1.2, MAP_SIZE - 1.2);
+      const baseOff = rawOffsets[idx];
+      const dx = form === 'line' ? (idx - (selected.length - 1) * 0.5) * 0.95 : baseOff.dx * scale;
+      const dy = form === 'line' ? 0 : baseOff.dy * scale;
+      const tx = clamp(gx + dx, 1.2, MAP_SIZE - 1.2);
+      const ty = clamp(gy + dy, 1.2, MAP_SIZE - 1.2);
       u.order = attackMove ? 'attack_move' : 'move';
       u.targetX = tx;
       u.targetY = ty;
+      u.waypoints = undefined;
+      u.patrolLoop = false;
       u.targetUnitId = undefined;
       u.targetBuildingId = undefined;
       this.assignPathTo(u, tx, ty, false);
@@ -908,7 +1580,7 @@ export class GameEngine {
         idleLab.gatherGx = gx;
         idleLab.gatherGy = gy;
         this.assignPathTo(idleLab, gx + 0.5, gy + 0.5, true);
-        this.addFloatingText(gx + 0.5, gy + 0.5, 'Laborer dispatched', '#facc15');
+        this.addFloatingText(gx + 0.5, gy + 0.5, 'Рабочий отправлен', '#facc15');
       } else {
         this.issueMoveOrAttackPoint(gx + 0.5, gy + 0.5, false);
       }
@@ -1025,6 +1697,43 @@ export class GameEngine {
 
     this.stats.elapsedSec += dt;
 
+    // 0. Authoritative v14.2 core simulation tick (mana, MagicStrain, 120s respawn, necromancy)
+    const heroUnit = this.getHero();
+    const coreTick = this.core.tickCoreSimulation(dt, heroUnit);
+    if (coreTick.avatarRespawned && heroUnit) {
+      const th = this.buildings.find((b) => b.faction === 'human' && b.type === 'town_hall');
+      heroUnit.x = th ? th.gx + 2.8 : 11.5;
+      heroUnit.y = th ? th.gy + 2.2 : 32.2;
+      heroUnit.order = 'idle';
+      this.particles.push({
+        x: heroUnit.x,
+        y: heroUnit.y,
+        z: 2,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        life: 0.85,
+        maxLife: 0.85,
+        size: 28,
+        color: '#38bdf8',
+        kind: 'rune_pillar',
+      });
+      this.spawnParticles(heroUnit.x, heroUnit.y, 22, '#60a5fa', 'magic', 12);
+      this.showBanner('Аватар возродился у Камня Душ', 3.6);
+      sound.levelUp();
+    }
+    if (coreTick.dormantMinionIds.length > 0) {
+      const dormantSet = new Set(coreTick.dormantMinionIds);
+      for (const u of this.units) {
+        if (u.minionId && dormantSet.has(u.minionId)) {
+          u.dormant = true;
+          u.order = 'idle';
+          this.unitPaths.delete(u.id);
+        }
+      }
+      this.showBanner('Мана истощена: скелеты перешли в покой до восстановления маны', 3.2);
+    }
+
     // 1. Update Buildings (construction, training queues, turret attacks)
     this.updateBuildings(dt);
 
@@ -1042,11 +1751,11 @@ export class GameEngine {
     this.updateFogOfWar();
     this.checkObjectivesAndEndState();
 
-    // 6. Auto-save every 20 seconds
+    // 6. Auto-save every 20 seconds (isolated slot §341.7)
     this.autoSaveTimer += dt;
     if (this.autoSaveTimer >= 20) {
       this.autoSaveTimer = 0;
-      this.saveGame();
+      this.saveGame('auto');
     }
   }
 
@@ -1074,13 +1783,13 @@ export class GameEngine {
             this.stats.barracksBuilt = true;
           }
           sound.complete();
-          this.addFloatingText(b.gx + b.size * 0.5, b.gy + b.size * 0.5, `${b.name} Complete`, '#facc15');
+          this.addFloatingText(b.gx + b.size * 0.5, b.gy + b.size * 0.5, `Построено: ${b.name}`, '#facc15');
         }
         continue;
       }
 
-      // Training Queue
-      if (b.queue.length > 0) {
+      // Training Queue (§15.8: paused while building is damaged)
+      if (b.queue.length > 0 && !(b.faction === 'human' && b.hp < b.maxHp)) {
         const current = b.queue[0];
         current.remaining -= dt;
         if (current.remaining <= 0) {
@@ -1092,7 +1801,7 @@ export class GameEngine {
             this.stats.swordsmenRecruited += 1;
           }
           sound.complete();
-          this.addFloatingText(u.x, u.y, `${u.name} Ready`, '#60a5fa');
+          this.addFloatingText(u.x, u.y, `Готов: ${u.name}`, '#60a5fa');
         }
       }
 
@@ -1127,36 +1836,33 @@ export class GameEngine {
   private updateUnits(dt: number) {
     for (const u of [...this.units]) {
       if (u.deadTimer && u.deadTimer > 0) {
-        u.deadTimer -= dt;
-        if (u.deadTimer <= 0 && u.type === 'hero') {
-          const th = this.buildings.find((b) => b.faction === 'human' && b.type === 'town_hall');
-          if (th) {
-            u.deadTimer = 0;
-            u.x = th.gx + 2.6;
-            u.y = th.gy + 1.8;
-            u.hp = Math.round(u.maxHp * 0.7);
-            u.order = 'idle';
-            this.spawnParticles(u.x, u.y, 18, '#60a5fa', 'magic', 14);
-            this.showBanner('Aldric revived at the Bindstone');
-            sound.levelUp();
-          }
-        }
+        // 120s Avatar respawn is driven authoritatively by CoreGameBridge.tickCoreSimulation (§288)
+        continue;
+      }
+
+      if (u.dormant) {
+        u.vx = 0;
+        u.vy = 0;
         continue;
       }
 
       u.animTime += dt;
       if (u.atkTimer > 0) u.atkTimer = Math.max(0, u.atkTimer - dt);
       if (u.attackAnimTimer > 0) u.attackAnimTimer = Math.max(0, u.attackAnimTimer - dt);
+      if (u.castAnimTimer && u.castAnimTimer > 0) {
+        u.castAnimTimer = Math.max(0, u.castAnimTimer - dt);
+      }
       if (u.hitFlashTimer > 0) u.hitFlashTimer = Math.max(0, u.hitFlashTimer - dt);
 
       if (u.type === 'hero') {
         if ((u.cleaveCooldown ?? 0) > 0) u.cleaveCooldown = Math.max(0, (u.cleaveCooldown ?? 0) - dt);
         if ((u.rallyCooldown ?? 0) > 0) u.rallyCooldown = Math.max(0, (u.rallyCooldown ?? 0) - dt);
-        // Subtle passive regeneration
+        // Subtle passive regeneration synced to HeroState
         if (u.hp < u.maxHp) {
           u.hp = Math.min(u.maxHp, u.hp + dt * 1.4);
+          this.core.getAvatar().hp = Math.min(this.core.getAvatar().maxHp, u.hp);
         }
-        // Loot chests nearby
+        // Check proximity to §128 loot containers
         this.checkChestLoot(u);
       }
 
@@ -1166,8 +1872,11 @@ export class GameEngine {
 
       const enemyFaction = u.faction === 'human' ? 'orc' : 'human';
 
-      // Auto-acquire enemies when idle or attack-moving (non-laborer)
-      if (u.type !== 'laborer' && (u.order === 'idle' || u.order === 'attack_move' || u.order === 'follow_hero')) {
+      // Auto-acquire enemies when idle, patrol, or attack-moving (non-laborer)
+      if (
+        u.type !== 'laborer' &&
+        (u.order === 'idle' || u.order === 'attack_move' || u.order === 'follow_hero' || u.order === 'patrol')
+      ) {
         const aggroRange = u.type === 'orc_commander' ? 6.5 : u.isRanged ? 6.5 : 5.2;
         const foe = this.findNearestEnemyUnit(u.x, u.y, enemyFaction, aggroRange);
         if (foe) {
@@ -1211,12 +1920,92 @@ export class GameEngine {
         } else {
           u.order = 'idle';
         }
-      } else if ((u.order === 'move' || u.order === 'attack_move') && u.targetX !== undefined && u.targetY !== undefined) {
+      } else if (
+        u.order === 'interact' &&
+        u.interactGx !== undefined &&
+        u.interactGy !== undefined &&
+        u.interactKind
+      ) {
+        const tx = u.interactGx + 0.5;
+        const ty = u.interactGy + 0.5;
+        if (distGrid(u.x, u.y, tx, ty) <= 1.95) {
+          const tile = this.tiles[u.interactGy]?.[u.interactGx];
+          if (u.interactKind === 'chest' && tile && !tile.chestLooted) {
+            const win = this.core.openChestLootWindow(tile);
+            if (win) {
+              sound.click();
+              this.spawnParticles(tx, ty, 14, '#facc15', 'magic', 8);
+              this.showBanner(`Открыт сундук: ${win.titleRu}`, 3.2);
+            }
+          } else if (u.interactKind === 'bindstone') {
+            const res = this.core.interactWithBindstone('avatar');
+            this.particles.push({
+              x: tx,
+              y: ty,
+              z: 2,
+              vx: 0,
+              vy: 0,
+              vz: 0,
+              life: 0.75,
+              maxLife: 0.75,
+              size: 26,
+              color: '#38bdf8',
+              kind: 'rune_pillar',
+            });
+            sound.levelUp();
+            this.showBanner(res.messageRu, 3.6);
+          } else if (u.interactKind === 'portal') {
+            const res = this.core.interactWithPortal('avatar', this.stats.commanderDefeated);
+            this.particles.push({
+              x: tx,
+              y: ty,
+              z: 4,
+              vx: 0,
+              vy: 0,
+              vz: 0,
+              life: 0.65,
+              maxLife: 0.65,
+              size: 28,
+              color: '#818cf8',
+              kind: 'ring',
+            });
+            sound.click();
+            this.showBanner(res.messageRu, 3.8);
+          }
+          u.order = 'idle';
+          u.interactGx = undefined;
+          u.interactGy = undefined;
+          u.interactKind = undefined;
+          this.unitPaths.delete(u.id);
+        } else {
+          this.moveAlongPathOrDirect(u, tx, ty, dt);
+        }
+      } else if (
+        (u.order === 'move' || u.order === 'attack_move' || u.order === 'patrol') &&
+        u.targetX !== undefined &&
+        u.targetY !== undefined
+      ) {
         const arrived = this.moveAlongPathOrDirect(u, u.targetX, u.targetY, dt);
         if (arrived) {
-          u.order = 'idle';
-          u.targetX = undefined;
-          u.targetY = undefined;
+          if (u.waypoints && u.waypoints.length > 0) {
+            if (u.patrolLoop) {
+              const finished = u.waypoints.shift()!;
+              u.waypoints.push(finished);
+              const next = u.waypoints[0];
+              u.targetX = next.x;
+              u.targetY = next.y;
+              this.assignPathTo(u, next.x, next.y, false);
+            } else {
+              const next = u.waypoints.shift()!;
+              u.targetX = next.x;
+              u.targetY = next.y;
+              this.assignPathTo(u, next.x, next.y, false);
+            }
+          } else {
+            u.order = 'idle';
+            u.targetX = undefined;
+            u.targetY = undefined;
+          }
         }
       } else if (u.faction === 'orc' && u.aiRole === 'raider') {
         // Raiders always march toward Human Town Hall
@@ -1339,12 +2128,14 @@ export class GameEngine {
         const amt = u.carryingAmount ?? 12;
         const kind = u.carryingKind;
         this.resources[kind] += amt;
+        this.core.recordSettlementDelivery(kind, amt);
         if (kind === 'wood') this.stats.gatheredWood += amt;
         if (kind === 'gold') this.stats.gatheredGold += amt;
         if (kind === 'stone') this.stats.gatheredStone += amt;
 
         const color = kind === 'gold' ? '#facc15' : kind === 'wood' ? '#84cc16' : '#cbd5e1';
-        this.addFloatingText(tx, ty, `+${amt} ${kind}`, color);
+        const kindLabel = kind === 'gold' ? 'руды' : kind === 'wood' ? 'древесины' : 'камня';
+        this.addFloatingText(tx, ty, `+${amt} ${kindLabel}`, color);
         sound.gather();
         u.carryingKind = undefined;
         u.carryingAmount = 0;
@@ -1415,72 +2206,161 @@ export class GameEngine {
   }
 
   private checkChestLoot(hero: Unit) {
+    if (this.core.activeLootWindow) return;
+    if (this.dismissedChestObjectId) {
+      let stillNearDismissed = false;
+      for (const row of this.tiles) {
+        for (const t of row) {
+          if (t.chestObjectId === this.dismissedChestObjectId) {
+            if (distGrid(hero.x, hero.y, t.gx + 0.5, t.gy + 0.5) <= 2.5) {
+              stillNearDismissed = true;
+            }
+          }
+        }
+      }
+      if (!stillNearDismissed) {
+        this.dismissedChestObjectId = null;
+      }
+    }
+
     const igx = Math.floor(hero.x);
     const igy = Math.floor(hero.y);
     for (let dy = -1; dy <= 1; dy++) {
       for (let dx = -1; dx <= 1; dx++) {
         const t = this.tiles[igy + dy]?.[igx + dx];
-        if (t && t.prop === 'chest' && !t.chestLooted) {
-          t.chestLooted = true;
-          this.resources.gold += 65;
-          this.stats.gatheredGold += 65;
-          this.grantHeroXp(45);
-
-          // Give curated relic/weapon/armor based on chest coordinates
-          let reward = ITEM_CATALOG.healing_draught;
-          if (t.gx < 16) reward = ITEM_CATALOG.leather_hauberk;
-          else if (t.gy > 25) reward = ITEM_CATALOG.runed_claymore;
-          else reward = ITEM_CATALOG.ember_signet;
-
-          this.inventory.push(reward);
-          sound.levelUp();
-          this.spawnParticles(t.gx + 0.5, t.gy + 0.5, 16, '#facc15', 'magic', 10);
-          this.addFloatingText(t.gx + 0.5, t.gy + 0.5, `Found ${reward.name}!`, '#facc15');
-          this.showBanner(`Relic Chest opened: +65 Gold & ${reward.name}`);
+        if (t && t.prop === 'chest' && !t.chestLooted && t.chestObjectId) {
+          if (t.chestObjectId === this.dismissedChestObjectId) continue;
+          const win = this.core.openChestLootWindow(t);
+          if (win) {
+            sound.click();
+            this.spawnParticles(t.gx + 0.5, t.gy + 0.5, 14, '#facc15', 'magic', 8);
+            this.showBanner(`Открыт сундук: ${win.titleRu}`, 3.2);
+            return;
+          }
         }
       }
     }
   }
 
-  private damageUnit(target: Unit, rawDamage: number, attacker?: Unit) {
+  private damageUnit(
+    target: Unit,
+    rawDamage: number,
+    attacker?: Unit,
+    damageType: DamageType = 'physical'
+  ) {
+    this.lastCombatTime = this.time;
     const eff = this.getUnitEffectiveStats(target);
-    const dmg = Math.max(2, rawDamage - eff.armor);
-    target.hp -= dmg;
-    target.hitFlashTimer = 0.12;
-    this.spawnParticles(target.x, target.y, 5, target.faction === 'orc' ? '#84cc16' : '#ef4444', 'blood', 8);
-    this.addFloatingText(target.x, target.y, `-${dmg}`, target.faction === 'orc' ? '#fca5a5' : '#f87171');
+    const targetHasShield =
+      target.type === 'swordsman' ||
+      target.type === 'orc_commander' ||
+      (target.type === 'hero' && Boolean(this.core.getAvatar().equipment.off_hand));
+    const targetShieldMastery =
+      target.type === 'hero'
+        ? this.core.getAvatar().combatMasteries.shields
+        : targetHasShield
+        ? 10
+        : 0;
 
+    const resolved = this.core.computeCombatDamage({
+      attackerIsHero: attacker?.type === 'hero',
+      attackerName: attacker?.name ?? 'Союзник',
+      targetName: target.name,
+      rawDamage,
+      damageType,
+      targetHp: target.hp,
+      targetArmor: eff.armor,
+      targetIsBoss: target.type === 'orc_commander',
+      targetHasShield,
+      targetShieldMastery,
+    });
+
+    if (resolved.missed) {
+      this.addFloatingText(target.x, target.y, 'Промах', '#94a3b8');
+      return;
+    }
+
+    const dmg = resolved.finalDamage;
+    target.hitFlashTimer = 0.12;
+    const fxColor =
+      damageType === 'fire'
+        ? '#fb923c'
+        : damageType === 'cold'
+        ? '#38bdf8'
+        : damageType === 'lightning'
+        ? '#fde047'
+        : target.faction === 'orc'
+        ? '#84cc16'
+        : '#ef4444';
+    this.spawnParticles(
+      target.x,
+      target.y,
+      5,
+      fxColor,
+      damageType === 'physical' ? 'blood' : 'spark',
+      8
+    );
+    this.addFloatingText(
+      target.x,
+      target.y,
+      resolved.blocked ? `Блок -${dmg}` : `-${dmg}`,
+      resolved.blocked
+        ? '#93c5fd'
+        : damageType === 'fire'
+        ? '#fb923c'
+        : damageType === 'cold'
+        ? '#38bdf8'
+        : damageType === 'lightning'
+        ? '#fde047'
+        : target.faction === 'orc'
+        ? '#fca5a5'
+        : '#f87171'
+    );
+
+    if (target.type === 'hero') {
+      const deathRes = this.core.applyDamageToAvatar(target, dmg);
+      if (deathRes.died) {
+        this.selectedUnitIds.delete(target.id);
+        this.syncSelectionToCore();
+        this.camera.shake = 7;
+        this.showBanner(
+          `Аватар пал! Возрождение у Камня Душ через ${deathRes.respawnSec} с...`,
+          5.0
+        );
+      }
+      return;
+    }
+
+    target.hp -= dmg;
     if (target.hp <= 0) {
       target.hp = 0;
-      if (target.type === 'hero') {
-        target.deadTimer = 12;
-        this.selectedUnitIds.delete(target.id);
-        this.camera.shake = 6;
-        this.showBanner('Aldric fell! Reviving at the Bindstone in 12s...');
-        return;
+      this.core.pushCombatLog(`${target.name} повержен`, 'kill');
+
+      if (target.type === 'skeleton_minion' && target.minionId) {
+        this.core.removeDestroyedSkeleton(target.minionId);
       }
 
       // Remove non-hero unit
       this.units = this.units.filter((u) => u.id !== target.id);
       this.selectedUnitIds.delete(target.id);
       this.unitPaths.delete(target.id);
+      this.syncSelectionToCore();
 
       this.spawnParticles(target.x, target.y, 12, '#dc2626', 'smoke', 10);
       if (target.faction === 'orc') {
         this.stats.orcsSlain += 1;
-        this.resources.gold += target.type === 'orc_commander' ? 150 : 12;
-        this.stats.gatheredGold += target.type === 'orc_commander' ? 150 : 12;
-        this.grantHeroXp(target.type === 'orc_commander' ? 120 : 28);
+        const bounty = target.type === 'orc_commander' ? 150 : 12;
+        this.resources.gold += bounty;
+        this.stats.gatheredGold += bounty;
+        this.core.recordSettlementDelivery('gold', bounty);
+        this.grantHeroXp(target.type === 'orc_commander' ? 120 : 28, target.type);
 
         if (target.type === 'orc_commander') {
           this.stats.commanderDefeated = true;
           this.hitstopTimer = 0.075;
           this.camera.shake = 11;
           this.inventory.push(ITEM_CATALOG.crown_plate);
-          this.showBanner('Warchief Grimgor is slain!');
-        } else if (attacker?.type === 'hero' && Math.random() < 0.22) {
-          this.inventory.push(ITEM_CATALOG.healing_draught);
-          this.addFloatingText(target.x, target.y, '+Crimson Draught', '#4ade80');
+          this.core.addPrototypeLootToPartyInventory('item_armor_brigandine', 1);
+          this.showBanner('Военачальник врагов повержен! Победа!', 5.0);
         }
       }
     }
@@ -1510,27 +2390,35 @@ export class GameEngine {
       if (b.faction === 'orc') {
         this.resources.gold += 50;
         this.stats.gatheredGold += 50;
-        this.grantHeroXp(50);
-        this.addFloatingText(b.gx + 1, b.gy + 1, '+50 Gold', '#facc15');
+        this.core.recordSettlementDelivery('gold', 50);
+        this.grantHeroXp(50, 'orc_structure');
+        this.addFloatingText(b.gx + 1, b.gy + 1, '+50 золота', '#facc15');
       }
     }
   }
 
-  private grantHeroXp(amount: number) {
+  private grantHeroXp(amount: number, variantId = 'orc_warrior') {
     const hero = this.getHero();
     if (!hero) return;
-    hero.xp = (hero.xp ?? 0) + amount;
-    while ((hero.xp ?? 0) >= (hero.xpToNext ?? 100)) {
-      hero.xp = (hero.xp ?? 0) - (hero.xpToNext ?? 100);
-      hero.level = (hero.level ?? 1) + 1;
-      hero.xpToNext = hero.level * 110;
-      const eff = this.getUnitEffectiveStats(hero);
-      hero.maxHp = eff.maxHp;
-      hero.hp = eff.maxHp;
+    const res = this.core.grantAvatarXp(variantId, amount, hero);
+    if (res.leveledUpTo !== null) {
       sound.levelUp();
+      this.particles.push({
+        x: hero.x,
+        y: hero.y,
+        z: 2,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        life: 0.75,
+        maxLife: 0.75,
+        size: 24,
+        color: '#facc15',
+        kind: 'rune_pillar',
+      });
       this.spawnParticles(hero.x, hero.y, 18, '#facc15', 'magic', 14);
-      this.addFloatingText(hero.x, hero.y, `LEVEL ${hero.level}!`, '#facc15');
-      this.showBanner(`Aldric reached Level ${hero.level}!`);
+      this.addFloatingText(hero.x, hero.y, `УРОВЕНЬ ${res.leveledUpTo}!`, '#facc15');
+      this.showBanner(`Аватар достиг уровня ${res.leveledUpTo}! Получены очки развития`, 3.5);
     }
   }
 
@@ -1538,20 +2426,52 @@ export class GameEngine {
     for (const p of [...this.projectiles]) {
       p.progress += dt / p.duration;
       if (p.progress >= 1) {
+        const dmgType = p.damageType ?? 'physical';
         if (p.targetUnitId) {
           const tu = this.units.find(
             (u) => u.id === p.targetUnitId && (!u.deadTimer || u.deadTimer <= 0)
           );
-          if (tu) this.damageUnit(tu, p.damage);
+          if (tu) {
+            this.damageUnit(tu, p.damage, p.faction === 'human' ? this.getHero() ?? undefined : undefined, dmgType);
+          }
         } else if (p.targetBuildingId) {
           const tb = this.buildings.find((b) => b.id === p.targetBuildingId);
           if (tb) this.damageBuilding(tb, p.damage);
         }
+
+        if (p.kind === 'fireball') {
+          this.particles.push({
+            x: p.targetX,
+            y: p.targetY,
+            z: 5,
+            vx: 0,
+            vy: 0,
+            vz: 0,
+            life: 0.42,
+            maxLife: 0.42,
+            size: 24,
+            color: '#f97316',
+            kind: 'ring',
+          });
+          this.spawnParticles(p.targetX, p.targetY, 18, '#fb923c', 'spark', 10);
+          this.camera.shake = Math.max(this.camera.shake, 3.5);
+          sound.heavyHit();
+          for (const e of [...this.units]) {
+            if (
+              e.faction === 'orc' &&
+              e.id !== p.targetUnitId &&
+              distGrid(p.targetX, p.targetY, e.x, e.y) <= 1.65
+            ) {
+              this.damageUnit(e, Math.round(p.damage * 0.45), this.getHero() ?? undefined, 'fire');
+            }
+          }
+        }
+
         this.projectiles = this.projectiles.filter((item) => item.id !== p.id);
       } else {
         p.x = p.startX + (p.targetX - p.startX) * p.progress;
         p.y = p.startY + (p.targetY - p.startY) * p.progress;
-        p.z = 12 + Math.sin(p.progress * Math.PI) * 18;
+        p.z = 12 + Math.sin(p.progress * Math.PI) * (p.kind === 'fireball' ? 10 : 18);
       }
     }
   }
@@ -1565,7 +2485,8 @@ export class GameEngine {
     targetUnitId: string | undefined,
     targetBuildingId: string | undefined,
     damage: number,
-    kind: Projectile['kind']
+    kind: Projectile['kind'],
+    damageType: DamageType = 'physical'
   ) {
     const dist = distGrid(sx, sy, tx, ty);
     this.projectiles.push({
@@ -1581,8 +2502,9 @@ export class GameEngine {
       targetUnitId,
       targetBuildingId,
       damage,
+      damageType,
       progress: 0,
-      duration: Math.max(0.14, dist * 0.075),
+      duration: Math.max(0.14, dist * (kind === 'fireball' ? 0.06 : 0.075)),
       kind,
     });
   }
@@ -1669,60 +2591,37 @@ export class GameEngine {
           createUnit(this.nextId('orc'), 'orc', uType, sx, sy, { aiRole: 'raider' })
         );
       }
-      this.showBanner('Orc raiders are marching toward your settlement!', 4.5);
+      this.showBanner('Вражеский отряд движется к вашему поселению!', 4.5);
     }
   }
 
   private updateFogOfWar() {
-    let explored = 0;
-    let orcSeen = this.stats.orcCampDiscovered;
-
-    for (let y = 0; y < MAP_SIZE; y++) {
-      for (let x = 0; x < MAP_SIZE; x++) {
-        const t = this.tiles[y][x];
-        if (t.fog === 2) t.fog = 1;
-        if (t.fog >= 1) explored += 1;
-      }
-    }
-
-    const revealCircle = (cx: number, cy: number, radius: number) => {
-      const r2 = radius * radius;
-      const minX = Math.max(0, Math.floor(cx - radius));
-      const maxX = Math.min(MAP_SIZE - 1, Math.ceil(cx + radius));
-      const minY = Math.max(0, Math.floor(cy - radius));
-      const maxY = Math.min(MAP_SIZE - 1, Math.ceil(cy + radius));
-      for (let y = minY; y <= maxY; y++) {
-        for (let x = minX; x <= maxX; x++) {
-          const dx = x + 0.5 - cx;
-          const dy = y + 0.5 - cy;
-          if (dx * dx + dy * dy <= r2) {
-            const tile = this.tiles[y][x];
-            if (tile.fog === 0) explored += 1;
-            tile.fog = 2;
-            if (tile.regionTag === 'orc_camp') {
-              orcSeen = true;
-            }
-          }
-        }
-      }
-    };
-
+    const observers: Array<{ x: number; y: number; visionRadius: number }> = [];
     for (const u of this.units) {
       if (u.faction === 'human' && (!u.deadTimer || u.deadTimer <= 0)) {
-        revealCircle(u.x, u.y, u.type === 'hero' ? 6.5 : 5.2);
+        observers.push({
+          x: u.x,
+          y: u.y,
+          visionRadius: u.type === 'hero' ? 6.8 : u.type === 'skeleton_minion' ? 4.5 : 5.4,
+        });
       }
     }
     for (const b of this.buildings) {
       if (b.faction === 'human') {
-        revealCircle(b.gx + b.size * 0.5, b.gy + b.size * 0.5, b.type === 'tower' ? 7.5 : 6.2);
+        observers.push({
+          x: b.gx + b.size * 0.5,
+          y: b.gy + b.size * 0.5,
+          visionRadius: b.type === 'tower' ? 7.8 : 6.4,
+        });
       }
     }
 
-    if (!this.stats.orcCampDiscovered && orcSeen) {
+    const res = this.core.syncFogOfWar(observers, this.tiles);
+    if (!this.stats.orcCampDiscovered && res.orcCampSeen) {
       this.stats.orcCampDiscovered = true;
-      this.showBanner('Orc Encampment discovered! Defeat Warchief Grimgor!');
+      this.showBanner('Лагерь врага обнаружен! Разгромите гарнизон и его командира!', 4.0);
     }
-    this.stats.exploredCount = explored;
+    this.stats.exploredCount = res.exploredCount;
   }
 
   private checkObjectivesAndEndState() {
@@ -1749,42 +2648,42 @@ export class GameEngine {
     return [
       {
         id: 'explore',
-        title: 'Explore the surrounding forest',
+        title: 'Разведать окрестности сектора',
         completed: this.stats.exploredCount >= exploredGoal,
-        progressText: `${Math.min(this.stats.exploredCount, exploredGoal)}/${exploredGoal} tiles`,
+        progressText: `${Math.min(this.stats.exploredCount, exploredGoal)}/${exploredGoal} кл.`,
       },
       {
         id: 'resources',
-        title: 'Collect wood and gold',
+        title: 'Собрать древесину и руду',
         completed: this.stats.gatheredWood >= woodGoal && this.stats.gatheredGold >= goldGoal,
-        progressText: `${Math.min(this.stats.gatheredWood, woodGoal)}/${woodGoal} W · ${Math.min(
+        progressText: `${Math.min(this.stats.gatheredWood, woodGoal)}/${woodGoal} Д · ${Math.min(
           this.stats.gatheredGold,
           goldGoal
-        )}/${goldGoal} G`,
+        )}/${goldGoal} З`,
       },
       {
         id: 'barracks',
-        title: 'Construct a Barracks',
+        title: 'Построить Казармы',
         completed: this.stats.barracksBuilt,
-        progressText: this.stats.barracksBuilt ? 'Done' : '0/1',
+        progressText: this.stats.barracksBuilt ? 'Готово' : '0/1',
       },
       {
         id: 'swordsmen',
-        title: 'Recruit five Swordsmen',
+        title: 'Нанять 5 мечников',
         completed: this.stats.swordsmenRecruited >= swordsmenGoal,
         progressText: `${Math.min(this.stats.swordsmenRecruited, swordsmenGoal)}/${swordsmenGoal}`,
       },
       {
         id: 'orc_camp',
-        title: 'Discover the Orc encampment',
+        title: 'Обнаружить вражеский лагерь',
         completed: this.stats.orcCampDiscovered,
-        progressText: this.stats.orcCampDiscovered ? 'Discovered' : 'Unexplored',
+        progressText: this.stats.orcCampDiscovered ? 'Найден' : 'Скрыт',
       },
       {
         id: 'commander',
-        title: 'Defeat Warchief Grimgor',
+        title: 'Повергнуть командира врага',
         completed: this.stats.commanderDefeated,
-        progressText: this.stats.commanderDefeated ? 'Slain' : 'Active',
+        progressText: this.stats.commanderDefeated ? 'Повержен' : 'Активен',
       },
     ];
   }
@@ -2080,6 +2979,11 @@ export class GameEngine {
       cameraZoom: Number(this.camera.zoom.toFixed(2)),
       bannerMessage: this.bannerMessage,
       hasSavedGame: this.hasSavedGame(),
+      v14Core: this.core.buildHudSummary(Array.from(this.selectedUnitIds), hero?.id ?? 'u_hero', {
+        inCombat: this.isPlayerInActiveCombat(),
+        hasManualSave: this.hasManualSave(),
+        hasAutoSave: this.hasAutoSave(),
+      }),
     };
   }
 }

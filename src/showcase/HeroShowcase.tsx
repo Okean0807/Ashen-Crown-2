@@ -15,6 +15,8 @@ import {
   Info,
   RotateCcw,
 } from 'lucide-react';
+import { computeDerivedHeroStats } from '../core/progression';
+import type { CampaignState, HeroState } from '../core/types';
 import {
   buildKaelVeyr,
   CharacterSpecs,
@@ -24,6 +26,8 @@ import {
 
 interface HeroShowcaseProps {
   onClose: () => void;
+  liveHero?: HeroState;
+  liveCampaign?: CampaignState;
 }
 
 type CameraProjection = 'perspective' | 'orthographic';
@@ -33,10 +37,24 @@ const PRESET_VIEWS: Record<
   FocusPreset,
   { label: string; pos: [number, number, number]; target: [number, number, number] }
 > = {
-  full: { label: 'Full Body', pos: [0.65, 1.32, 3.05], target: [0, 0.96, 0] },
-  face: { label: 'Face & Scar', pos: [0.18, 1.72, 0.72], target: [0, 1.70, 0.03] },
-  armor: { label: 'Armor & Amulet', pos: [-0.42, 1.24, 1.18], target: [0.02, 1.15, 0.04] },
-  blade: { label: 'Runic Sword', pos: [-0.95, 1.08, 1.15], target: [-0.28, 0.88, 0.38] },
+  full: { label: 'В полный рост', pos: [0.65, 1.32, 3.05], target: [0, 0.96, 0] },
+  face: { label: 'Лицо', pos: [0.18, 1.72, 0.72], target: [0, 1.7, 0.03] },
+  armor: { label: 'Доспех и амулет', pos: [-0.42, 1.24, 1.18], target: [0.02, 1.15, 0.04] },
+  blade: { label: 'Клинок', pos: [-0.95, 1.08, 1.15], target: [-0.28, 0.88, 0.38] },
+};
+
+const ANIM_LABELS: Record<HeroAnimName, string> = {
+  Idle: 'Покой',
+  Walk: 'Шаг',
+  Run: 'Бег',
+  Attack: 'Атака',
+  Death: 'Гибель',
+};
+
+const SPEC_LABELS_RU: Record<HeroState['specialization'], string> = {
+  warrior: 'Воин',
+  mage: 'Маг',
+  hybrid: 'Гибрид',
 };
 
 const ANIMATIONS: HeroAnimName[] = ['Idle', 'Walk', 'Run', 'Attack', 'Death'];
@@ -52,7 +70,11 @@ function detectSoftwareRenderer(gl: WebGLRenderingContext | WebGL2RenderingConte
   }
 }
 
-export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
+export const HeroShowcase: React.FC<HeroShowcaseProps> = ({
+  onClose,
+  liveHero,
+  liveCampaign,
+}) => {
   const mountRef = useRef<HTMLDivElement | null>(null);
 
   const [activeAnim, setActiveAnim] = useState<HeroAnimName>('Idle');
@@ -64,6 +86,11 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
   const [showSkeleton, setShowSkeleton] = useState(false);
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [specs, setSpecs] = useState<CharacterSpecs | null>(null);
+
+  const liveDerived =
+    liveHero && liveCampaign
+      ? computeDerivedHeroStats(liveHero, liveCampaign.itemsByInstanceId)
+      : null;
 
   // Refs bridging React controls into the Three.js runtime
   const runtimeRef = useRef<{
@@ -96,14 +123,15 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
       alpha: false,
     });
     const isSoftware = detectSoftwareRenderer(renderer.getContext());
-    const dpr = isSoftware ? 1 : Math.min(window.devicePixelRatio || 1, 2);
+    const isMobile = window.innerWidth < 820;
+    const dpr = isSoftware ? 1 : Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
 
     renderer.setPixelRatio(dpr);
     renderer.setSize(width, height);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.08;
-    renderer.shadowMap.enabled = true;
+    renderer.toneMappingExposure = 1.1;
+    renderer.shadowMap.enabled = !isSoftware;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.domElement.style.display = 'block';
     renderer.domElement.style.width = '100%';
@@ -211,7 +239,46 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
     const ringMesh = new THREE.Mesh(ringGeo, ringMat);
     ringMesh.position.y = -0.002;
 
-    studioGroup.add(floorMesh, plinthMesh, ringMesh);
+    // Subtle arcane runic outer halo & warm brazier accent light
+    const outerHaloGeo = new THREE.RingGeometry(0.95, 1.02, 64);
+    outerHaloGeo.rotateX(-Math.PI * 0.5);
+    const outerHaloMat = new THREE.MeshBasicMaterial({
+      color: 0xc49a45,
+      transparent: true,
+      opacity: 0.38,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const outerHaloMesh = new THREE.Mesh(outerHaloGeo, outerHaloMat);
+    outerHaloMesh.position.y = -0.055;
+
+    const emberLight = new THREE.PointLight(0xf59e0b, 1.6, 5.5, 1.6);
+    emberLight.position.set(1.35, 0.85, 1.15);
+    scene.add(emberLight);
+
+    // Floating atmospheric ash/ember motes
+    const moteCount = isSoftware ? 35 : isMobile ? 65 : 110;
+    const motePos = new Float32Array(moteCount * 3);
+    for (let i = 0; i < moteCount; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const rad = 0.65 + Math.random() * 2.4;
+      motePos[i * 3] = Math.cos(a) * rad;
+      motePos[i * 3 + 1] = 0.1 + Math.random() * 2.4;
+      motePos[i * 3 + 2] = Math.sin(a) * rad;
+    }
+    const moteGeo = new THREE.BufferGeometry();
+    moteGeo.setAttribute('position', new THREE.BufferAttribute(motePos, 3));
+    const moteMat = new THREE.PointsMaterial({
+      color: 0xf5c96b,
+      size: 0.028,
+      transparent: true,
+      opacity: 0.52,
+      depthWrite: false,
+    });
+    const emberMotes = new THREE.Points(moteGeo, moteMat);
+    scene.add(emberMotes);
+
+    studioGroup.add(floorMesh, plinthMesh, ringMesh, outerHaloMesh);
     scene.add(studioGroup);
 
     // Build Kael Veyr Character
@@ -293,6 +360,9 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
 
       rt.mixer.update(dt);
       rt.character.updateVisualFx(elapsed);
+      emberMotes.rotation.y = elapsed * 0.09;
+      emberMotes.position.y = Math.sin(elapsed * 0.8) * 0.08;
+      emberLight.intensity = 1.55 + Math.sin(elapsed * 5.2) * 0.22;
 
       if (rt.tweenTarget.active) {
         const alpha = 1 - Math.exp(-7.5 * dt);
@@ -310,6 +380,9 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
 
       rt.controls.update();
       renderer.render(scene, rt.activeCam);
+      if (isSoftware) {
+        renderer.getContext().flush();
+      }
     };
     rafId = requestAnimationFrame(animate);
 
@@ -326,6 +399,10 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
       plinthMat.dispose();
       ringGeo.dispose();
       ringMat.dispose();
+      outerHaloGeo.dispose();
+      outerHaloMat.dispose();
+      moteGeo.dispose();
+      moteMat.dispose();
       envTarget.dispose();
       pmrem.dispose();
       renderer.dispose();
@@ -464,16 +541,26 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
             className="min-h-[44px] px-3.5 py-2 rounded-md bg-[#121620] hover:bg-[#1b2130] border border-[#c49a45]/45 text-[#eae3d2] text-xs sm:text-sm font-medium flex items-center gap-2 cursor-pointer shadow-lg"
           >
             <ArrowLeft className="w-4 h-4 text-[#c49a45]" />
-            <span>Back</span>
+            <span>Назад</span>
           </button>
 
-          <div className="px-3.5 py-1.5 rounded-md bg-[#121620]/95 border border-[#2b3242] shadow-lg">
+          <div className="px-3.5 py-1.5 rounded-md bg-[#121620]/96 border border-[#2b3242] shadow-lg">
             <div className="text-[10px] tracking-[0.18em] uppercase text-[#c49a45] font-semibold">
-              Hero Asset Showcase
+              3D Витрина Аватара · v14.2
             </div>
             <h1 className="font-display text-sm sm:text-base font-bold text-[#f2ece0] leading-tight">
-              Kael Veyr — The Ashen Warden
+              {liveHero
+                ? `${liveHero.nameRu} · Ур. ${liveHero.level} (${SPEC_LABELS_RU[liveHero.specialization]})`
+                : 'Аватар · 3D Модель'}
             </h1>
+            {liveHero && liveDerived && (
+              <div className="text-[11px] font-mono-num text-[#9e9788] mt-0.5">
+                HP {Math.ceil(liveHero.hp)}/{Math.round(liveDerived.maxHp)} · MP{' '}
+                {Math.floor(liveHero.mana)}/{Math.round(liveDerived.maxMana)} · Нагрузка{' '}
+                {Math.round(liveHero.magicStrain.index)} · STR {liveDerived.effectiveAttributes.STR}{' '}
+                DEX {liveDerived.effectiveAttributes.DEX} INT {liveDerived.effectiveAttributes.INT}
+              </div>
+            )}
           </div>
         </div>
 
@@ -482,11 +569,11 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
           <button
             type="button"
             onClick={() => handleFocusPreset('full')}
-            aria-label="Reset Camera"
+            aria-label="Сброс вида"
             className="min-h-[44px] min-w-[44px] px-3 rounded-md bg-[#121620] hover:bg-[#1b2130] border border-[#2b3242] text-[#c5beae] hover:text-[#f2ece0] flex items-center justify-center gap-1.5 text-xs cursor-pointer shadow-lg"
           >
             <RotateCcw className="w-4 h-4 text-[#c49a45]" />
-            <span className="hidden sm:inline">Reset View</span>
+            <span className="hidden sm:inline">Сброс вида</span>
           </button>
           <button
             type="button"
@@ -498,7 +585,7 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
             }`}
           >
             <Info className="w-4 h-4" />
-            <span className="hidden sm:inline">Specs &amp; .GLB</span>
+            <span className="hidden sm:inline">Модель и .GLB</span>
           </button>
         </div>
       </div>
@@ -509,7 +596,7 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
           <div className="flex items-center justify-between border-b border-[#252c3c] pb-2">
             <div>
               <h2 className="font-display text-sm font-bold text-[#f2ece0]">
-                3D Character Technical Report
+                Параметры 3D-модели персонажа
               </h2>
               <p className="text-[11px] text-[#9e9788]">
                 Three.js SkinnedMesh · PBR · AnimationMixer
@@ -519,34 +606,34 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
 
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div className="p-2 rounded bg-[#181c27] border border-[#262d3d]">
-              <div className="text-[10px] text-[#8f8879]">Triangles</div>
+              <div className="text-[10px] text-[#8f8879]">Полигоны</div>
               <div className="font-mono-num font-semibold text-[#f2ece0]">
                 {specs.triangleCount.toLocaleString()}
               </div>
             </div>
             <div className="p-2 rounded bg-[#181c27] border border-[#262d3d]">
-              <div className="text-[10px] text-[#8f8879]">Vertices / Meshes</div>
+              <div className="text-[10px] text-[#8f8879]">Вершины / Меши</div>
               <div className="font-mono-num font-semibold text-[#f2ece0]">
                 {specs.vertexCount.toLocaleString()} / {specs.meshCount}
               </div>
             </div>
             <div className="p-2 rounded bg-[#181c27] border border-[#262d3d]">
-              <div className="text-[10px] text-[#8f8879]">Skeleton Bones</div>
+              <div className="text-[10px] text-[#8f8879]">Скелет</div>
               <div className="font-mono-num font-semibold text-[#f2ece0]">
-                {specs.boneCount} Bones
+                {specs.boneCount} костей
               </div>
             </div>
             <div className="p-2 rounded bg-[#181c27] border border-[#262d3d]">
-              <div className="text-[10px] text-[#8f8879]">Materials / Maps</div>
+              <div className="text-[10px] text-[#8f8879]">Материалы / Карты</div>
               <div className="font-mono-num font-semibold text-[#f2ece0]">
-                {specs.materialCount} Mats · {specs.textureCount} Maps
+                {specs.materialCount} мат. · {specs.textureCount} карт
               </div>
             </div>
           </div>
 
           <div className="text-[11px] text-[#b4ad9d] space-y-1">
             <div className="text-[10px] uppercase tracking-wider text-[#c49a45] font-semibold">
-              Procedural PBR Texture Maps
+              Процедурные PBR-карты
             </div>
             {specs.textureSummary.map((line) => (
               <div key={line} className="truncate">
@@ -566,7 +653,7 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
               }`}
             >
               <Grid className="w-3.5 h-3.5" />
-              <span>Wireframe</span>
+              <span>Сетка</span>
             </button>
             <button
               type="button"
@@ -578,7 +665,7 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
               }`}
             >
               <Bone className="w-3.5 h-3.5" />
-              <span>Rig Bones</span>
+              <span>Кости рига</span>
             </button>
           </div>
 
@@ -588,7 +675,7 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
             className="min-h-[44px] w-full px-3 py-2 rounded bg-[#c49a45] hover:bg-[#d6ac56] text-[#101218] font-semibold text-xs flex items-center justify-center gap-2 cursor-pointer"
           >
             <Download className="w-4 h-4" />
-            <span>Export Rigged .GLB Asset</span>
+            <span>Экспорт в .GLB</span>
           </button>
           {exportStatus && (
             <div className="text-[11px] text-center text-[#9fd3a8]">{exportStatus}</div>
@@ -598,12 +685,12 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
 
       {/* Single Collapsible Bottom Control Dock (Animation + Camera + Focus) */}
       <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 w-[calc(100%-1.5rem)] max-w-3xl pointer-events-none">
-        <div className="rounded-lg bg-[#11151f]/95 border border-[#c49a45]/40 shadow-2xl pointer-events-auto overflow-hidden">
+        <div className="rounded-lg bg-[#11151f]/96 border border-[#c49a45]/40 shadow-2xl pointer-events-auto overflow-hidden">
           <div className="flex items-center justify-between px-3 py-1.5 border-b border-[#232939]">
             <div className="text-[11px] text-[#9e9788] flex items-center gap-2 truncate">
-              <span className="text-[#c49a45] font-semibold">Controls</span>
+              <span className="text-[#c49a45] font-semibold">Управление</span>
               <span className="hidden sm:inline">
-                Drag / Touch 1-Finger: Orbit 360° · Scroll / Pinch: Zoom
+                Вращение: перетаскивание · Масштаб: колесо / пинч
               </span>
             </div>
             <button
@@ -611,7 +698,7 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
               onClick={() => setDockCollapsed((v) => !v)}
               className="min-h-[34px] px-2 text-xs text-[#c5beae] hover:text-[#f2ece0] flex items-center gap-1 cursor-pointer"
             >
-              <span>{dockCollapsed ? 'Show' : 'Hide'}</span>
+              <span>{dockCollapsed ? 'Показать' : 'Скрыть'}</span>
               {dockCollapsed ? (
                 <ChevronUp className="w-4 h-4" />
               ) : (
@@ -625,7 +712,7 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
               {/* Row 1: 5 Skeletal Animations */}
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-[10px] uppercase tracking-wider text-[#8f8879] mr-1 hidden sm:inline">
-                  Anim
+                  Анимация
                 </span>
                 {ANIMATIONS.map((anim) => {
                   const active = activeAnim === anim;
@@ -640,7 +727,7 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
                           : 'bg-[#1a1f2b] hover:bg-[#242b3c] text-[#eae3d2] border border-[#2d3548]'
                       }`}
                     >
-                      {anim}
+                      {ANIM_LABELS[anim]}
                     </button>
                   );
                 })}
@@ -659,7 +746,7 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
                         : 'bg-[#171b26] text-[#9e9788] border border-[#262d3d]'
                     }`}
                   >
-                    Perspective
+                    Перспектива
                   </button>
                   <button
                     type="button"
@@ -670,7 +757,7 @@ export const HeroShowcase: React.FC<HeroShowcaseProps> = ({ onClose }) => {
                         : 'bg-[#171b26] text-[#9e9788] border border-[#262d3d]'
                     }`}
                   >
-                    Orthographic
+                    Ортография
                   </button>
                 </div>
 

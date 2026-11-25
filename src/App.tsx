@@ -1,12 +1,33 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import type { ControlGroupSlot } from './core/fieldCommands';
+import type { VerticalSliceSandbox } from './core/sandboxFactory';
+import type { FormationType } from './core/types';
 import { GameHUD } from './components/GameHUD';
-import { InventoryModal, PauseModal, VictoryDefeatModal } from './components/Overlays';
+import {
+  InventoryModal,
+  LootChestModal,
+  PauseModal,
+  VictoryDefeatModal,
+} from './components/Overlays';
 import { TitleScreen } from './components/TitleScreen';
+import { V14VerticalSliceModal } from './components/V14VerticalSliceModal';
 import { sound } from './game/audio';
 import { GameEngine } from './game/engine';
 import { MAP_SIZE, clamp, pinchZoomCamera } from './game/iso';
-import { renderMinimap, renderWorld } from './game/renderer';
-import { BuildingType, HudSnapshot, MobileActionMode, ResourceKind, UnitType } from './game/types';
+import { IsoWorldRenderer3D } from './game/isoRenderer3D';
+import {
+  renderMinimap,
+  renderTacticalOverlay,
+  renderWorld,
+  type RenderState,
+} from './game/renderer';
+import {
+  BuildingType,
+  HudSnapshot,
+  MobileActionMode,
+  ResourceKind,
+  UnitType,
+} from './game/types';
 import { HeroShowcase } from './showcase/HeroShowcase';
 
 export default function App() {
@@ -15,6 +36,10 @@ export default function App() {
     engineRef.current = new GameEngine();
   }
 
+  const webglMountRef = useRef<HTMLDivElement | null>(null);
+  const renderer3DRef = useRef<IsoWorldRenderer3D | null>(null);
+  const use3DRef = useRef<boolean>(false);
+
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const desktopMinimapRef = useRef<HTMLCanvasElement | null>(null);
   const mobileMinimapRef = useRef<HTMLCanvasElement | null>(null);
@@ -22,6 +47,7 @@ export default function App() {
   const [hud, setHud] = useState<HudSnapshot>(() => engineRef.current!.getHudSnapshot());
   const [inventoryOpen, setInventoryOpen] = useState(false);
   const [showcaseOpen, setShowcaseOpen] = useState(false);
+  const [v14SliceOpen, setV14SliceOpen] = useState(false);
 
   const keysHeldRef = useRef<Set<string>>(new Set());
   const marqueeRef = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -67,7 +93,49 @@ export default function App() {
     }
   }, []);
 
-  // Main 60fps simulation + canvas render loop
+  const handleExternalV14Sync = useCallback(
+    (nextSandbox: VerticalSliceSandbox) => {
+      const engine = engineRef.current;
+      if (!engine) return;
+      engine.core.sandbox = JSON.parse(JSON.stringify(nextSandbox));
+      engine.syncFromExternalCoreMutation();
+      syncHud();
+    },
+    [syncHud]
+  );
+
+  // Mount Three.js 3D Isometric World Renderer (with graceful 2D Canvas fallback)
+  useEffect(() => {
+    const mount = webglMountRef.current;
+    const engine = engineRef.current!;
+    if (!mount) return;
+
+    try {
+      const r3d = new IsoWorldRenderer3D(mount, {
+        onContextLost: () => {
+          use3DRef.current = false;
+          engine.core.rendererMode = 'canvas2d';
+        },
+      });
+      renderer3DRef.current = r3d;
+      use3DRef.current = true;
+      engine.core.rendererMode = 'webgl3d';
+    } catch {
+      renderer3DRef.current = null;
+      use3DRef.current = false;
+      engine.core.rendererMode = 'canvas2d';
+    }
+
+    return () => {
+      if (renderer3DRef.current) {
+        renderer3DRef.current.dispose();
+        renderer3DRef.current = null;
+      }
+      use3DRef.current = false;
+    };
+  }, []);
+
+  // Main 60fps simulation + 3D WebGL + 2D tactical overlay render loop
   useEffect(() => {
     let rafId = 0;
     let lastTime = performance.now();
@@ -76,7 +144,8 @@ export default function App() {
     const handleResize = () => {
       const canvas = canvasRef.current;
       if (!canvas) return;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const isMobile = window.innerWidth < 820;
+      const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
       const w = window.innerWidth;
       const h = window.innerHeight;
       canvas.width = Math.floor(w * dpr);
@@ -115,40 +184,57 @@ export default function App() {
 
       engine.update(dt, vw, vh);
 
+      const canPlace =
+        engine.buildMode && engine.hoverGrid
+          ? engine.canPlaceBuildingAt(
+              engine.buildMode,
+              engine.hoverGrid.gx,
+              engine.hoverGrid.gy
+            )
+          : false;
+
+      const renderState: RenderState = {
+        tiles: engine.tiles,
+        units: engine.units,
+        buildings: engine.buildings,
+        projectiles: engine.projectiles,
+        particles: engine.particles,
+        floatingTexts: engine.floatingTexts,
+        selectedUnitIds: engine.selectedUnitIds,
+        selectedBuildingId: engine.selectedBuildingId,
+        camera: engine.camera,
+        time: engine.time,
+        buildMode: engine.buildMode,
+        hoverGrid: engine.hoverGrid,
+        canPlaceBuild: canPlace,
+        marquee: marqueeRef.current,
+      };
+
+      const r3d = renderer3DRef.current;
+      const using3D = Boolean(use3DRef.current && r3d);
+
+      if (using3D && r3d) {
+        r3d.render(renderState, vw, vh);
+      }
+
       if (canvas) {
         const ctx = canvas.getContext('2d');
         if (ctx) {
-          const dpr = Math.min(window.devicePixelRatio || 1, 2);
+          const isMobile = vw < 820;
+          const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
           ctx.save();
           ctx.scale(dpr, dpr);
-
-          const canPlace =
-            engine.buildMode && engine.hoverGrid
-              ? engine.canPlaceBuildingAt(
-                  engine.buildMode,
-                  engine.hoverGrid.gx,
-                  engine.hoverGrid.gy
-                )
-              : false;
-
-          renderWorld(ctx, vw, vh, {
-            tiles: engine.tiles,
-            units: engine.units,
-            buildings: engine.buildings,
-            projectiles: engine.projectiles,
-            particles: engine.particles,
-            floatingTexts: engine.floatingTexts,
-            selectedUnitIds: engine.selectedUnitIds,
-            selectedBuildingId: engine.selectedBuildingId,
-            camera: engine.camera,
-            time: engine.time,
-            buildMode: engine.buildMode,
-            hoverGrid: engine.hoverGrid,
-            canPlaceBuild: canPlace,
-            marquee: marqueeRef.current,
-          });
+          if (using3D) {
+            renderTacticalOverlay(ctx, vw, vh, renderState);
+          } else {
+            renderWorld(ctx, vw, vh, renderState);
+          }
           ctx.restore();
         }
+      }
+
+      if (using3D && r3d) {
+        r3d.afterDrawSync();
       }
 
       // Render active minimaps
@@ -237,7 +323,7 @@ export default function App() {
     };
   }, []);
 
-  // Keyboard shortcuts + held-key tracking
+  // Keyboard shortcuts + v14.2 Control Groups (Ctrl+1..6 / 1..6), Spells (F/G/X), Back-stack (Esc §348.6)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (showcaseOpen) {
@@ -246,12 +332,18 @@ export default function App() {
         }
         return;
       }
+      if (v14SliceOpen) {
+        return;
+      }
       keysHeldRef.current.add(e.code);
       const engine = engineRef.current!;
 
       if (engine.screen === 'PLAYING') {
         if (e.code === 'Escape') {
-          if (inventoryOpen) {
+          if (engine.core.activeLootWindow) {
+            engine.closeLootWindow();
+            syncHud();
+          } else if (inventoryOpen) {
             setInventoryOpen(false);
           } else if (engine.buildMode) {
             engine.buildMode = null;
@@ -260,11 +352,28 @@ export default function App() {
             engine.screen = 'PAUSED';
             syncHud();
           }
-        } else if (e.code === 'Digit1') {
-          engine.centerOnHero();
-          syncHud();
-        } else if (e.code === 'Digit2') {
-          engine.selectAllArmy();
+        } else if (
+          e.code === 'Digit1' ||
+          e.code === 'Digit2' ||
+          e.code === 'Digit3' ||
+          e.code === 'Digit4' ||
+          e.code === 'Digit5' ||
+          e.code === 'Digit6'
+        ) {
+          const slot = Number(e.code.replace('Digit', '')) as ControlGroupSlot;
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            engine.assignControlGroupSlot(slot);
+          } else {
+            const count = engine.core.fieldSelection.controlGroups[slot].length;
+            if (count > 0) {
+              engine.recallControlGroupSlot(slot);
+            } else if (slot === 1) {
+              engine.centerOnHero();
+            } else if (slot === 2) {
+              engine.selectAllArmy();
+            }
+          }
           syncHud();
         } else if (e.code === 'Space') {
           e.preventDefault();
@@ -284,6 +393,21 @@ export default function App() {
           syncHud();
         } else if (e.code === 'KeyE') {
           engine.triggerHeroRally();
+          syncHud();
+        } else if (e.code === 'KeyF') {
+          engine.castHeroSpell('spell_elem_fire_bolt');
+          syncHud();
+        } else if (e.code === 'KeyG') {
+          engine.castHeroSpell('spell_life_mend');
+          syncHud();
+        } else if (e.code === 'KeyX') {
+          engine.castHeroSpell('spell_dark_raise_skeleton');
+          syncHud();
+        } else if (e.code === 'KeyC') {
+          engine.castHeroSpell('spell_elem_frost_nova');
+          syncHud();
+        } else if (e.code === 'KeyV') {
+          engine.castHeroSpell('spell_elem_spark');
           syncHud();
         } else if (e.code === 'KeyI') {
           setInventoryOpen((v) => !v);
@@ -314,7 +438,7 @@ export default function App() {
       window.removeEventListener('keyup', onKeyUp);
       window.removeEventListener('blur', onBlur);
     };
-  }, [inventoryOpen, showcaseOpen, syncHud]);
+  }, [inventoryOpen, showcaseOpen, v14SliceOpen, syncHud]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     sound.unlock();
@@ -423,7 +547,6 @@ export default function App() {
     const totalDist = Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY);
     if (totalDist > tapThreshold) {
       if (!drag.moved && drag.mode === 'pan') {
-        // Avoid initial jump when crossing tap threshold by resetting delta anchor once
         drag.lastX = e.clientX;
         drag.lastY = e.clientY;
       }
@@ -450,7 +573,6 @@ export default function App() {
       pinchStateRef.current.active = false;
     }
 
-    // Wait until all fingers leave screen after a pinch gesture before allowing taps again
     if (suppressTapAfterPinchRef.current) {
       if (pointersRef.current.size === 0) {
         suppressTapAfterPinchRef.current = false;
@@ -478,7 +600,8 @@ export default function App() {
 
     if (drag.button === 2) {
       if (!drag.moved) {
-        engine.handleWorldSecondaryClick(e.clientX, e.clientY, vw, vh);
+        const mod: 'none' | 'shift' | 'alt' = e.altKey ? 'alt' : e.shiftKey ? 'shift' : 'none';
+        engine.handleWorldSecondaryClick(e.clientX, e.clientY, vw, vh, mod);
       }
     } else if (drag.button === 0) {
       if (drag.mode === 'marquee' && drag.moved && marqueeRef.current) {
@@ -511,7 +634,11 @@ export default function App() {
   };
 
   return (
-    <main className="relative w-full h-full overflow-hidden bg-[#0d0f14] touch-none">
+    <main className="relative w-full h-full overflow-hidden bg-[#0c131d] touch-none">
+      {/* Dedicated Three.js 3D PBR Isometric World Container (never apply CSS backdrop-blur over WebGL) */}
+      <div ref={webglMountRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+
+      {/* Transparent 2D Tactical Overlay & Input Canvas (falls back to full 2D renderer if WebGL unavailable) */}
       <canvas
         ref={canvasRef}
         onPointerDown={handlePointerDown}
@@ -519,10 +646,10 @@ export default function App() {
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}
         onContextMenu={(e) => e.preventDefault()}
-        className="block w-full h-full touch-none cursor-default"
+        className="absolute inset-0 block w-full h-full touch-none cursor-default"
       />
 
-      {!showcaseOpen && hud.screen === 'TITLE' && (
+      {!showcaseOpen && !v14SliceOpen && hud.screen === 'TITLE' && (
         <TitleScreen
           hasSavedGame={hud.hasSavedGame}
           onNewGame={() => {
@@ -543,6 +670,11 @@ export default function App() {
             sound.unlock();
             sound.click();
             setShowcaseOpen(true);
+          }}
+          onOpenV14Slice={() => {
+            sound.unlock();
+            sound.click();
+            setV14SliceOpen(true);
           }}
         />
       )}
@@ -574,6 +706,10 @@ export default function App() {
             engineRef.current!.trainUnit(bId, uType);
             syncHud();
           }}
+          onRepairBuilding={(bId: string) => {
+            engineRef.current!.repairBuilding(bId);
+            syncHud();
+          }}
           onAssignLaborer={(kind: ResourceKind) => {
             engineRef.current!.assignIdleLaborer(kind);
             syncHud();
@@ -590,9 +726,29 @@ export default function App() {
             engineRef.current!.triggerHeroRally();
             syncHud();
           }}
+          onCastSpell={(spellId) => {
+            engineRef.current!.castHeroSpell(spellId);
+            syncHud();
+          }}
+          onAssignControlGroup={(slot) => {
+            engineRef.current!.assignControlGroupSlot(slot);
+            syncHud();
+          }}
+          onRecallControlGroup={(slot) => {
+            engineRef.current!.recallControlGroupSlot(slot);
+            syncHud();
+          }}
+          onSetFormation={(formation: FormationType) => {
+            engineRef.current!.setFormation(formation);
+            syncHud();
+          }}
           onOpenInventory={() => {
             sound.click();
             setInventoryOpen(true);
+          }}
+          onOpenV14Slice={() => {
+            sound.click();
+            setV14SliceOpen(true);
           }}
           onSetMobileMode={(m: MobileActionMode) => {
             engineRef.current!.mobileMode = m;
@@ -638,19 +794,50 @@ export default function App() {
         />
       )}
 
-      {inventoryOpen && hud.screen === 'PLAYING' && (
-        <InventoryModal
-          hud={hud}
-          onClose={() => setInventoryOpen(false)}
-          onUseOrEquip={(idx) => {
-            engineRef.current!.equipOrUseItem(idx);
+      {hud.screen === 'PLAYING' && hud.v14Core?.activeLootWindow && (
+        <LootChestModal
+          lootWindow={hud.v14Core.activeLootWindow}
+          onTakeEntry={(entryId) => {
+            engineRef.current!.takeLootEntry(entryId);
+            syncHud();
+          }}
+          onTakeAll={() => {
+            engineRef.current!.takeAllLoot();
+            syncHud();
+          }}
+          onClose={() => {
+            engineRef.current!.closeLootWindow();
             syncHud();
           }}
         />
       )}
 
-      {!showcaseOpen && hud.screen === 'PAUSED' && (
+      {inventoryOpen && hud.screen === 'PLAYING' && (
+        <InventoryModal
+          hud={hud}
+          onClose={() => setInventoryOpen(false)}
+          onEquipCoreItem={(instanceId) => {
+            engineRef.current!.equipCoreItem(instanceId);
+            syncHud();
+          }}
+          onUnequipCoreSlot={(slot) => {
+            engineRef.current!.unequipCoreSlot(slot);
+            syncHud();
+          }}
+          onTranscribeCoreScroll={(instanceId) => {
+            engineRef.current!.transcribeCoreScroll(instanceId);
+            syncHud();
+          }}
+          onOpenV14Slice={() => {
+            setInventoryOpen(false);
+            setV14SliceOpen(true);
+          }}
+        />
+      )}
+
+      {!showcaseOpen && !v14SliceOpen && hud.screen === 'PAUSED' && (
         <PauseModal
+          hasSavedGame={hud.hasSavedGame}
           onResume={() => {
             sound.click();
             engineRef.current!.screen = 'PLAYING';
@@ -658,13 +845,26 @@ export default function App() {
           }}
           onSave={() => {
             sound.click();
-            engineRef.current!.saveGame();
-            engineRef.current!.screen = 'PLAYING';
+            const saved = engineRef.current!.saveGame('manual');
+            if (saved) {
+              engineRef.current!.screen = 'PLAYING';
+            }
+            syncHud();
+          }}
+          onLoad={() => {
+            sound.click();
+            if (engineRef.current!.loadGame('latest')) {
+              setInventoryOpen(false);
+            }
             syncHud();
           }}
           onOpenShowcase={() => {
             sound.click();
             setShowcaseOpen(true);
+          }}
+          onOpenV14Slice={() => {
+            sound.click();
+            setV14SliceOpen(true);
           }}
           onRestart={() => {
             sound.click();
@@ -699,7 +899,20 @@ export default function App() {
         />
       )}
 
-      {showcaseOpen && <HeroShowcase onClose={() => setShowcaseOpen(false)} />}
+      {showcaseOpen && (
+        <HeroShowcase
+          onClose={() => setShowcaseOpen(false)}
+          liveHero={engineRef.current!.core.getAvatar()}
+          liveCampaign={engineRef.current!.core.sandbox.campaign}
+        />
+      )}
+      {v14SliceOpen && (
+        <V14VerticalSliceModal
+          onClose={() => setV14SliceOpen(false)}
+          externalSandbox={engineRef.current!.core.sandbox}
+          onExternalSync={handleExternalV14Sync}
+        />
+      )}
     </main>
   );
 }

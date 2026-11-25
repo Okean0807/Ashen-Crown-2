@@ -8,6 +8,7 @@ import {
   gridToWorld,
   screenToWorld,
   worldToGrid,
+  worldToScreen,
 } from './iso';
 import {
   BUILDING_BLUEPRINTS,
@@ -1111,6 +1112,8 @@ export function renderMinimap(
       else if (t.terrain === 'ruin_floor') col = '#4e5751';
       else if (t.prop === 'tree_pine' || t.prop === 'tree_oak') col = '#1a361f';
       else if (t.prop === 'gold_vein') col = '#d4a024';
+      else if (t.prop === 'portal') col = '#818cf8';
+      else if (t.prop === 'bindstone') col = '#38bdf8';
 
       ctx.fillStyle = col;
       ctx.fillRect(x * cellW, y * cellH, Math.ceil(cellW), Math.ceil(cellH));
@@ -1135,6 +1138,8 @@ export function renderMinimap(
     ctx.fillStyle =
       u.type === 'hero'
         ? '#facc15'
+        : u.type === 'skeleton_minion'
+        ? '#38bdf8'
         : u.type === 'orc_commander'
         ? '#f97316'
         : u.faction === 'human'
@@ -1164,3 +1169,191 @@ export function renderMinimap(
   ctx.closePath();
   ctx.stroke();
 }
+
+/**
+ * Прозрачный 2D тактический слой поверх 3D WebGL-сцены:
+ * полоски HP/Маны, предпросмотр постройки, маршрутные точки/патруль (§292.8),
+ * всплывающие числа урона/ресурсов и рамка выделения.
+ */
+export function renderTacticalOverlay(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  state: RenderState
+) {
+  ctx.clearRect(0, 0, width, height);
+  const {
+    tiles,
+    units,
+    buildings,
+    floatingTexts,
+    camera,
+    buildMode,
+    hoverGrid,
+    canPlaceBuild,
+    selectedUnitIds,
+    selectedBuildingId,
+    marquee,
+  } = state;
+
+  const zoom = camera.zoom;
+
+  // 1. Build placement footprint preview
+  if (buildMode && hoverGrid) {
+    const bp = BUILDING_BLUEPRINTS[buildMode];
+    if (bp) {
+      ctx.save();
+      ctx.fillStyle = canPlaceBuild ? 'rgba(74, 222, 128, 0.28)' : 'rgba(239, 68, 68, 0.34)';
+      ctx.strokeStyle = canPlaceBuild ? 'rgba(134, 239, 172, 0.9)' : 'rgba(252, 165, 165, 0.95)';
+      ctx.lineWidth = 1.6;
+      for (let dy = 0; dy < bp.size; dy++) {
+        for (let dx = 0; dx < bp.size; dx++) {
+          const gx = hoverGrid.gx + dx;
+          const gy = hoverGrid.gy + dy;
+          const elev = tiles[gy]?.[gx]?.elevation ?? 1;
+          const { wx, wy } = gridToWorld(gx, gy, elev);
+          const { sx, sy } = worldToScreen(wx, wy, camera, width, height);
+          drawIsoDiamond(ctx, sx, sy, TILE_W * zoom, TILE_H * zoom);
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+  }
+
+  // 2. Waypoints & Patrol routes for selected units (§292.8)
+  ctx.save();
+  ctx.setLineDash([5, 5]);
+  ctx.lineWidth = 1.6;
+  for (const u of units) {
+    if (!selectedUnitIds.has(u.id) || (u.deadTimer && u.deadTimer > 0)) continue;
+    if (u.targetX === undefined || u.targetY === undefined) continue;
+    const uElev = tiles[Math.floor(u.y)]?.[Math.floor(u.x)]?.elevation ?? 1;
+    const p0 = worldToScreen(
+      gridToWorld(u.x, u.y, uElev).wx,
+      gridToWorld(u.x, u.y, uElev).wy,
+      camera,
+      width,
+      height
+    );
+    const pts: Array<{ x: number; y: number }> = [{ x: u.targetX, y: u.targetY }];
+    if (u.waypoints && u.waypoints.length > 0) {
+      for (const wp of u.waypoints) pts.push(wp);
+    }
+    ctx.strokeStyle = u.order === 'patrol' ? 'rgba(56, 189, 248, 0.8)' : 'rgba(167, 139, 250, 0.72)';
+    ctx.beginPath();
+    ctx.moveTo(p0.sx, p0.sy);
+    for (const pt of pts) {
+      const e = tiles[Math.floor(pt.y)]?.[Math.floor(pt.x)]?.elevation ?? 1;
+      const wPos = gridToWorld(pt.x, pt.y, e);
+      const sPos = worldToScreen(wPos.wx, wPos.wy, camera, width, height);
+      ctx.lineTo(sPos.sx, sPos.sy);
+    }
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  // 3. Building HP & construction progress bars
+  for (const b of buildings) {
+    const cx = b.gx + b.size * 0.5;
+    const cy = b.gy + b.size * 0.5;
+    const t = tiles[Math.floor(cy)]?.[Math.floor(cx)];
+    if (b.faction === 'orc' && (!t || t.fog < 1)) continue;
+    const selected = selectedBuildingId === b.id;
+    if (b.hp >= b.maxHp && b.constructed && !selected) continue;
+
+    const elev = t?.elevation ?? 1;
+    const wPos = gridToWorld(cx, cy, elev);
+    const { sx, sy } = worldToScreen(wPos.wx, wPos.wy - (b.size * 22 + 16), camera, width, height);
+    const bw = Math.max(42, b.size * 22 * Math.min(1.15, zoom));
+    ctx.fillStyle = 'rgba(8, 12, 18, 0.85)';
+    ctx.fillRect(sx - bw * 0.5, sy, bw, 6);
+    ctx.fillStyle = !b.constructed ? '#38bdf8' : b.faction === 'human' ? '#22c55e' : '#ef4444';
+    const ratio = !b.constructed ? b.buildProgress : Math.max(0, b.hp / b.maxHp);
+    ctx.fillRect(sx - bw * 0.5 + 1, sy + 1, (bw - 2) * ratio, 4);
+  }
+
+  // 4. Unit HP & Hero Mana bars
+  for (const u of units) {
+    if (u.deadTimer && u.deadTimer > 0) continue;
+    const t = tiles[Math.floor(u.y)]?.[Math.floor(u.x)];
+    if (u.faction === 'orc' && (!t || t.fog < 2)) continue;
+    const selected = selectedUnitIds.has(u.id);
+    const isHero = u.type === 'hero';
+    const isBoss = u.type === 'orc_commander';
+    const isSkel = u.type === 'skeleton_minion';
+    if (u.hp >= u.maxHp && !selected && !isHero && !isBoss && !u.dormant) continue;
+
+    const elev = t?.elevation ?? 1;
+    const wPos = gridToWorld(u.x, u.y, elev);
+    const yOff = isBoss ? 54 : isHero ? 48 : 38;
+    const { sx, sy } = worldToScreen(wPos.wx, wPos.wy - yOff, camera, width, height);
+    const bw = isBoss ? 44 : isHero ? 38 : 26;
+
+    ctx.fillStyle = 'rgba(8, 12, 18, 0.86)';
+    ctx.fillRect(sx - bw * 0.5, sy, bw, isHero ? 8 : 5);
+    ctx.fillStyle =
+      u.faction === 'human'
+        ? isHero
+          ? '#facc15'
+          : isSkel
+          ? u.dormant
+            ? '#64748b'
+            : '#38bdf8'
+          : '#22c55e'
+        : isBoss
+        ? '#f97316'
+        : '#ef4444';
+    ctx.fillRect(sx - bw * 0.5 + 1, sy + 1, (bw - 2) * Math.max(0, u.hp / u.maxHp), 3);
+
+    if (isHero && u.maxMana && u.maxMana > 0) {
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillRect(
+        sx - bw * 0.5 + 1,
+        sy + 5,
+        (bw - 2) * Math.max(0, Math.min(1, (u.mana ?? 0) / u.maxMana)),
+        2
+      );
+    }
+
+    if (u.dormant) {
+      ctx.font = 'bold 10px Inter, system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText('СОН (§105)', sx, sy - 4);
+    }
+  }
+
+  // 5. Floating combat / resource / magic texts
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 12px Inter, system-ui, sans-serif';
+  for (const ft of floatingTexts) {
+    const t = tiles[Math.floor(ft.y)]?.[Math.floor(ft.x)];
+    const elev = t?.elevation ?? 1;
+    const wPos = gridToWorld(ft.x, ft.y, elev);
+    const { sx, sy } = worldToScreen(wPos.wx, wPos.wy - ft.z - 22, camera, width, height);
+    ctx.globalAlpha = clamp(ft.life / Math.max(0.01, ft.maxLife), 0, 1);
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+    ctx.fillText(ft.text, sx + 1, sy + 1);
+    ctx.fillStyle = ft.color;
+    ctx.fillText(ft.text, sx, sy);
+  }
+  ctx.restore();
+
+  // 6. Selection Marquee Box
+  if (marquee) {
+    const rx = Math.min(marquee.x0, marquee.x1);
+    const ry = Math.min(marquee.y0, marquee.y1);
+    const rw = Math.abs(marquee.x1 - marquee.x0);
+    const rh = Math.abs(marquee.y1 - marquee.y0);
+    ctx.fillStyle = 'rgba(74, 222, 128, 0.14)';
+    ctx.fillRect(rx, ry, rw, rh);
+    ctx.strokeStyle = 'rgba(134, 239, 172, 0.9)';
+    ctx.lineWidth = 1.4;
+    ctx.strokeRect(rx, ry, rw, rh);
+  }
+}
+

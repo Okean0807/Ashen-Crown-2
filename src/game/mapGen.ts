@@ -247,23 +247,33 @@ export function generateScenarioWorld(): GeneratedWorld {
   }
 
   // Place Ruin Props & Loot Chests
-  const ruinProps: Array<{ x: number; y: number; prop: Tile['prop']; walkable: boolean }> = [
+  const ruinProps: Array<{
+    x: number;
+    y: number;
+    prop: Tile['prop'];
+    walkable: boolean;
+    chestObjectId?: string;
+  }> = [
     { x: 10, y: 15, prop: 'ruin_pillar', walkable: false },
     { x: 14, y: 15, prop: 'ruin_arch', walkable: false },
-    { x: 12, y: 17, prop: 'chest', walkable: true },
+    { x: 12, y: 17, prop: 'chest', walkable: true, chestObjectId: 'chest_ruin_nw' },
 
     { x: 22, y: 30, prop: 'ruin_pillar', walkable: false },
     { x: 26, y: 31, prop: 'ruin_arch', walkable: false },
-    { x: 24, y: 31, prop: 'chest', walkable: true },
+    { x: 24, y: 31, prop: 'chest', walkable: true, chestObjectId: 'chest_ruin_se' },
 
     { x: 21, y: 9, prop: 'ruin_pillar', walkable: false },
     { x: 25, y: 11, prop: 'ruin_pillar', walkable: false },
-    { x: 23, y: 10, prop: 'chest', walkable: true },
+    { x: 23, y: 10, prop: 'chest', walkable: true, chestObjectId: 'chest_ruin_ne' },
+    { x: 13, y: 26, prop: 'portal', walkable: false },
   ];
   for (const rp of ruinProps) {
     const t = tiles[rp.y][rp.x];
     t.prop = rp.prop;
     t.walkable = rp.walkable;
+    if (rp.chestObjectId) {
+      t.chestObjectId = rp.chestObjectId;
+    }
   }
 
   // 6. Dense Forests (Wood Nodes) around settlement & western ridge & NE flank
