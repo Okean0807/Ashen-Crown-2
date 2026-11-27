@@ -170,6 +170,8 @@ export interface Building {
 export interface Projectile {
   id: string;
   faction: Faction;
+  attackerId?: string;
+  attackerName?: string;
   x: number;
   y: number;
   z: number;

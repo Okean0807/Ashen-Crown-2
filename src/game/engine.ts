@@ -26,6 +26,7 @@ import {
   Building,
   BuildingType,
   EquipSlot,
+  Faction,
   FloatingText,
   GameScreen,
   HudSnapshot,
@@ -474,7 +475,8 @@ export class GameEngine {
         targetBld?.id,
         dmg,
         'fireball',
-        'fire'
+        'fire',
+        { id: hero.id, name: hero.name }
       );
       this.spawnParticles(hero.x, hero.y, 14, '#f97316', 'magic', 12);
       this.particles.push({
@@ -619,7 +621,8 @@ export class GameEngine {
         targetBld?.id,
         dmg,
         'bolt',
-        'lightning'
+        'lightning',
+        { id: hero.id, name: hero.name }
       );
       this.spawnParticles(hero.x, hero.y, 12, '#fde047', 'spark', 10);
       this.addFloatingText(hero.x, hero.y, `Искра (-${cast.manaSpent} МП)`, '#fde047');
@@ -666,10 +669,18 @@ export class GameEngine {
     this.core.activeLootWindow = null;
   }
 
+  private formatHeroRespawnRefusal(actionRu: string): string {
+    const hero = this.getHero();
+    const coreSec = this.core.getAvatar().deathState.respawnRemainingSec;
+    const rawSec = coreSec > 0 ? coreSec : hero?.deadTimer ?? 0;
+    const sec = Math.max(1, Math.ceil(rawSec));
+    return `Аватар пал — ${actionRu} можно после возрождения у Камня Душ (через ${sec} с)`;
+  }
+
   public equipCoreItem(instanceId: string): boolean {
     const hero = this.getHero();
     if (!hero || (hero.deadTimer && hero.deadTimer > 0)) {
-      this.showBanner('Аватар возрождается и не может сменить снаряжение', 2.6);
+      this.showBanner(this.formatHeroRespawnRefusal('надеть предмет'), 3.4);
       return false;
     }
     const res = this.core.equipCoreInventoryItem(instanceId, hero);
@@ -684,7 +695,10 @@ export class GameEngine {
 
   public unequipCoreSlot(slot: EquipSlotId): boolean {
     const hero = this.getHero();
-    if (!hero || (hero.deadTimer && hero.deadTimer > 0)) return false;
+    if (!hero || (hero.deadTimer && hero.deadTimer > 0)) {
+      this.showBanner(this.formatHeroRespawnRefusal('снять снаряжение'), 3.4);
+      return false;
+    }
     const res = this.core.unequipCoreEquipmentSlot(slot, hero);
     if (!res.ok) {
       this.showBanner(res.reasonRu ?? 'Не удалось снять предмет', 2.4);
@@ -696,7 +710,10 @@ export class GameEngine {
 
   public transcribeCoreScroll(instanceId: string): boolean {
     const hero = this.getHero();
-    if (!hero || (hero.deadTimer && hero.deadTimer > 0)) return false;
+    if (!hero || (hero.deadTimer && hero.deadTimer > 0)) {
+      this.showBanner(this.formatHeroRespawnRefusal('изучить свиток'), 3.4);
+      return false;
+    }
     const res = this.core.useCoreSpellScroll(instanceId, hero);
     if (!res.ok) {
       this.showBanner(res.reasonRu ?? 'Не удалось изучить свиток', 3.0);
@@ -1824,7 +1841,9 @@ export class GameEngine {
               target.id,
               undefined,
               b.type === 'tower' ? 22 : 16,
-              'bolt'
+              'bolt',
+              'physical',
+              { id: b.id, name: b.name }
             );
             sound.arrowShot();
           }
@@ -2069,7 +2088,9 @@ export class GameEngine {
             target.id,
             undefined,
             eff.atk,
-            u.faction === 'human' ? 'arrow' : 'orc_arrow'
+            u.faction === 'human' ? 'arrow' : 'orc_arrow',
+            'physical',
+            { id: u.id, name: u.name }
           );
           sound.arrowShot();
         } else {
@@ -2102,7 +2123,9 @@ export class GameEngine {
             undefined,
             bld.id,
             eff.atk,
-            u.faction === 'human' ? 'arrow' : 'orc_arrow'
+            u.faction === 'human' ? 'arrow' : 'orc_arrow',
+            'physical',
+            { id: u.id, name: u.name }
           );
           sound.arrowShot();
         } else {
@@ -2246,7 +2269,8 @@ export class GameEngine {
     target: Unit,
     rawDamage: number,
     attacker?: Unit,
-    damageType: DamageType = 'physical'
+    damageType: DamageType = 'physical',
+    attackerMeta?: { name?: string; faction?: Faction; isHero?: boolean }
   ) {
     this.lastCombatTime = this.time;
     const eff = this.getUnitEffectiveStats(target);
@@ -2261,9 +2285,16 @@ export class GameEngine {
         ? 10
         : 0;
 
+    const fallbackFaction: Faction =
+      attacker?.faction ?? attackerMeta?.faction ?? (target.faction === 'human' ? 'orc' : 'human');
+    const resolvedAttackerName =
+      attacker?.name ??
+      attackerMeta?.name ??
+      (fallbackFaction === 'orc' ? 'Противник' : 'Союзник');
+
     const resolved = this.core.computeCombatDamage({
-      attackerIsHero: attacker?.type === 'hero',
-      attackerName: attacker?.name ?? 'Союзник',
+      attackerIsHero: attacker?.type === 'hero' || Boolean(attackerMeta?.isHero),
+      attackerName: resolvedAttackerName,
       targetName: target.name,
       rawDamage,
       damageType,
@@ -2427,12 +2458,29 @@ export class GameEngine {
       p.progress += dt / p.duration;
       if (p.progress >= 1) {
         const dmgType = p.damageType ?? 'physical';
+        const resolvedAttacker = p.attackerId
+          ? this.units.find((u) => u.id === p.attackerId)
+          : undefined;
+        const hero = this.getHero();
+        const isHeroProjectile =
+          resolvedAttacker?.type === 'hero' ||
+          (hero !== null && p.attackerId === hero.id) ||
+          (p.faction === 'human' && (p.kind === 'fireball' || p.kind === 'necrotic_orb'));
+        const attackerMeta = {
+          name:
+            resolvedAttacker?.name ??
+            p.attackerName ??
+            (p.faction === 'orc' ? 'Противник' : 'Союзник'),
+          faction: p.faction,
+          isHero: isHeroProjectile,
+        };
+
         if (p.targetUnitId) {
           const tu = this.units.find(
             (u) => u.id === p.targetUnitId && (!u.deadTimer || u.deadTimer <= 0)
           );
           if (tu) {
-            this.damageUnit(tu, p.damage, p.faction === 'human' ? this.getHero() ?? undefined : undefined, dmgType);
+            this.damageUnit(tu, p.damage, resolvedAttacker, dmgType, attackerMeta);
           }
         } else if (p.targetBuildingId) {
           const tb = this.buildings.find((b) => b.id === p.targetBuildingId);
@@ -2462,7 +2510,13 @@ export class GameEngine {
               e.id !== p.targetUnitId &&
               distGrid(p.targetX, p.targetY, e.x, e.y) <= 1.65
             ) {
-              this.damageUnit(e, Math.round(p.damage * 0.45), this.getHero() ?? undefined, 'fire');
+              this.damageUnit(
+                e,
+                Math.round(p.damage * 0.45),
+                resolvedAttacker ?? hero ?? undefined,
+                'fire',
+                attackerMeta
+              );
             }
           }
         }
@@ -2486,12 +2540,15 @@ export class GameEngine {
     targetBuildingId: string | undefined,
     damage: number,
     kind: Projectile['kind'],
-    damageType: DamageType = 'physical'
+    damageType: DamageType = 'physical',
+    attacker?: { id?: string; name: string }
   ) {
     const dist = distGrid(sx, sy, tx, ty);
     this.projectiles.push({
       id: this.nextId('proj'),
       faction,
+      attackerId: attacker?.id,
+      attackerName: attacker?.name,
       x: sx,
       y: sy,
       z: 12,

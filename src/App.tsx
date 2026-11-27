@@ -2,6 +2,10 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { ControlGroupSlot } from './core/fieldCommands';
 import type { VerticalSliceSandbox } from './core/sandboxFactory';
 import type { FormationType } from './core/types';
+import {
+  DiagnosticsOverlay,
+  type RuntimeDiagnosticsSnapshot,
+} from './components/DiagnosticsOverlay';
 import { GameHUD } from './components/GameHUD';
 import {
   InventoryModal,
@@ -48,6 +52,15 @@ export default function App() {
   const [inventoryOpen, setInventoryOpen] = useState(false);
   const [showcaseOpen, setShowcaseOpen] = useState(false);
   const [v14SliceOpen, setV14SliceOpen] = useState(false);
+  const [diagnosticsEnabled, setDiagnosticsEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const params = new URLSearchParams(window.location.search);
+    return params.get('diag') === '1' || params.get('diagnostics') === '1';
+  });
+  const diagnosticsEnabledRef = useRef<boolean>(diagnosticsEnabled);
+  diagnosticsEnabledRef.current = diagnosticsEnabled;
+  const rendererErrorsRef = useRef<string[]>([]);
+  const [diagSnapshot, setDiagSnapshot] = useState<RuntimeDiagnosticsSnapshot | null>(null);
 
   const keysHeldRef = useRef<Set<string>>(new Set());
   const marqueeRef = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -110,20 +123,32 @@ export default function App() {
     const engine = engineRef.current!;
     if (!mount) return;
 
+    const pushRendererError = (msg: string) => {
+      const list = rendererErrorsRef.current;
+      if (list[list.length - 1] !== msg) {
+        list.push(msg);
+        if (list.length > 8) list.shift();
+      }
+    };
+
     try {
       const r3d = new IsoWorldRenderer3D(mount, {
         onContextLost: () => {
           use3DRef.current = false;
           engine.core.rendererMode = 'canvas2d';
+          pushRendererError('WebGL context lost — выполнен откат на 2D');
         },
       });
       renderer3DRef.current = r3d;
       use3DRef.current = true;
       engine.core.rendererMode = 'webgl3d';
-    } catch {
+    } catch (err) {
       renderer3DRef.current = null;
       use3DRef.current = false;
       engine.core.rendererMode = 'canvas2d';
+      pushRendererError(
+        `WebGL недоступен: ${err instanceof Error ? err.message : String(err)}`
+      );
     }
 
     return () => {
@@ -140,6 +165,9 @@ export default function App() {
     let rafId = 0;
     let lastTime = performance.now();
     let hudAccum = 0;
+    let diagAccum = 0;
+    let diagFrames = 0;
+    let diagFrameMsSum = 0;
 
     const handleResize = () => {
       const canvas = canvasRef.current;
@@ -211,10 +239,21 @@ export default function App() {
       };
 
       const r3d = renderer3DRef.current;
-      const using3D = Boolean(use3DRef.current && r3d);
+      let using3D = Boolean(use3DRef.current && r3d);
 
       if (using3D && r3d) {
-        r3d.render(renderState, vw, vh);
+        try {
+          r3d.render(renderState, vw, vh);
+        } catch (err) {
+          use3DRef.current = false;
+          using3D = false;
+          engine.core.rendererMode = 'canvas2d';
+          const msg = `Ошибка WebGL render: ${err instanceof Error ? err.message : String(err)}`;
+          if (rendererErrorsRef.current[rendererErrorsRef.current.length - 1] !== msg) {
+            rendererErrorsRef.current.push(msg);
+            if (rendererErrorsRef.current.length > 8) rendererErrorsRef.current.shift();
+          }
+        }
       }
 
       if (canvas) {
@@ -279,6 +318,57 @@ export default function App() {
         setHud(engine.getHudSnapshot());
       }
 
+      if (diagnosticsEnabledRef.current) {
+        diagAccum += rawDt;
+        diagFrames += 1;
+        diagFrameMsSum += rawDt * 1000;
+        if (diagAccum >= 0.5) {
+          const fps = Math.round(diagFrames / diagAccum);
+          const frameMs = diagFrames > 0 ? diagFrameMsSum / diagFrames : 0;
+          const isMobile = vw < 820;
+          const fallbackDpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
+          const info3D = using3D && r3d ? r3d.getDiagnosticInfo() : null;
+          const aliveUnits = engine.units.filter((u) => u.hp > 0 && (u.deadTimer ?? 0) <= 0).length;
+          const aliveBuildings = engine.buildings.filter((b) => b.hp > 0).length;
+          const projCount = engine.projectiles.length;
+          const partCount = engine.particles.length;
+
+          setDiagSnapshot({
+            renderer: using3D ? 'WebGL (Three.js)' : '2D (Canvas fallback)',
+            fps,
+            frameMs,
+            viewportWidth: vw,
+            viewportHeight: vh,
+            canvasWidth: canvas?.width ?? 0,
+            canvasHeight: canvas?.height ?? 0,
+            devicePixelRatio: window.devicePixelRatio || 1,
+            effectiveDpr: info3D ? info3D.effectiveDpr : fallbackDpr,
+            webglState: info3D ? info3D.webglState : 'UNAVAILABLE',
+            gpuRenderer: info3D ? info3D.gpuRenderer : '',
+            isSoftwareGl: info3D ? info3D.isSoftwareGl : false,
+            gameObjects: {
+              total: aliveUnits + aliveBuildings + projCount + partCount,
+              units: aliveUnits,
+              buildings: aliveBuildings,
+              projectiles: projCount,
+              particles: partCount,
+              sceneMeshes3D: info3D ? info3D.sceneMeshes3D : null,
+              drawCalls: info3D ? info3D.drawCalls : null,
+              triangles: info3D ? info3D.triangles : null,
+            },
+            errors: [...rendererErrorsRef.current],
+          });
+
+          diagAccum = 0;
+          diagFrames = 0;
+          diagFrameMsSum = 0;
+        }
+      } else {
+        diagAccum = 0;
+        diagFrames = 0;
+        diagFrameMsSum = 0;
+      }
+
       rafId = requestAnimationFrame(frame);
     };
 
@@ -326,6 +416,11 @@ export default function App() {
   // Keyboard shortcuts + v14.2 Control Groups (Ctrl+1..6 / 1..6), Spells (F/G/X), Back-stack (Esc §348.6)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'F9') {
+        e.preventDefault();
+        setDiagnosticsEnabled((v) => !v);
+        return;
+      }
       if (showcaseOpen) {
         if (e.code === 'Escape') {
           setShowcaseOpen(false);
@@ -838,6 +933,11 @@ export default function App() {
       {!showcaseOpen && !v14SliceOpen && hud.screen === 'PAUSED' && (
         <PauseModal
           hasSavedGame={hud.hasSavedGame}
+          diagnosticsEnabled={diagnosticsEnabled}
+          onToggleDiagnostics={() => {
+            sound.click();
+            setDiagnosticsEnabled((v) => !v);
+          }}
           onResume={() => {
             sound.click();
             engineRef.current!.screen = 'PLAYING';
@@ -911,6 +1011,12 @@ export default function App() {
           onClose={() => setV14SliceOpen(false)}
           externalSandbox={engineRef.current!.core.sandbox}
           onExternalSync={handleExternalV14Sync}
+        />
+      )}
+      {diagnosticsEnabled && diagSnapshot && (
+        <DiagnosticsOverlay
+          data={diagSnapshot}
+          onClose={() => setDiagnosticsEnabled(false)}
         />
       )}
     </main>

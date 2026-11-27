@@ -125,7 +125,8 @@ export const GameHUD: React.FC<GameHUDProps> = ({
   const [showObjectives, setShowObjectives] = useState(false);
   const [showCombatLog, setShowCombatLog] = useState(false);
   const [rightTab, setRightTab] = useState<'build' | 'orders'>('build');
-  const [mobileDrawer, setMobileDrawer] = useState<'none' | 'build' | 'map'>('none');
+  const [mobileDrawer, setMobileDrawer] = useState<'none' | 'build' | 'map' | 'army'>('none');
+  const [mobileGroupAssignMode, setMobileGroupAssignMode] = useState(false);
 
   const currentObj =
     hud.objectives.find((o) => !o.completed) ?? hud.objectives[hud.objectives.length - 1];
@@ -143,158 +144,197 @@ export const GameHUD: React.FC<GameHUDProps> = ({
     onMinimapNav(e.clientX, e.clientY, e.currentTarget);
   };
 
+  const isDuplicateRespawnBanner = Boolean(
+    v14 &&
+      v14.avatarRespawnSec > 0 &&
+      hud.bannerMessage &&
+      (hud.bannerMessage === 'Аватар возрождается у Камня Душ' ||
+        /^Аватар пал! Возрождение у Камня Душ/.test(hud.bannerMessage))
+  );
+
   return (
     <div className="pointer-events-none fixed inset-0 z-10 flex flex-col justify-between">
-      {/* TOP BAR */}
-      <header className="pointer-events-auto flex items-center justify-between gap-2 px-2.5 py-1.5 sm:px-4 sm:py-2 bg-[#10131a]/96 border-b border-[#c49a45]/30 text-xs">
-        {/* Resources Cluster */}
-        <div className="flex items-center gap-2.5 sm:gap-4 font-mono-num shrink-0">
-          <div className="flex items-center gap-1" title="Золото / Руда">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <circle cx="8" cy="8" r="6" fill="#eab308" stroke="#fef08a" strokeWidth="1.2" />
-            </svg>
-            <span className="font-semibold text-[#facc15]">{hud.resources.gold}</span>
-          </div>
-          <div className="flex items-center gap-1" title="Древесина">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M8 2L13 11H3L8 2Z" fill="#65a30d" />
-              <rect x="7" y="11" width="2" height="3" fill="#78350f" />
-            </svg>
-            <span className="font-semibold text-[#a3e635]">{hud.resources.wood}</span>
-          </div>
-          <div className="flex items-center gap-1" title="Камень">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <polygon points="3,13 5,5 11,4 14,13" fill="#94a3b8" />
-            </svg>
-            <span className="font-semibold text-[#cbd5e1]">{hud.resources.stone}</span>
-          </div>
-          <div className="hidden sm:flex items-center gap-1 text-[#d6cfc0]" title="Лимит армии">
-            <span className="text-[#8f8879]">Отр</span>
-            <span className="font-semibold">
-              {hud.popUsed}/{hud.popCap}
-            </span>
-          </div>
-          {v14 && (
-            <div
-              className="hidden lg:flex items-center gap-3 pl-2 border-l border-[#2a3142] text-[11px]"
-              title="Магические показатели и казна Аватара"
-            >
-              <span className="text-[#38bdf8]">
-                Мана {v14.heroMana}/{v14.heroMaxMana}
+      {/* TOP BAR — 2 responsive rows on mobile (<640px), single clean row on sm+/tablet/desktop (DEF-01, DEF-03, DEF-05) */}
+      <header className="pointer-events-auto flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between sm:gap-2 px-2 py-1.5 sm:px-3 lg:px-4 sm:py-2 bg-[#10131a]/96 border-b border-[#c49a45]/30 text-xs">
+        {/* Row 1 (mobile) / Left+Right clusters via sm:contents */}
+        <div className="flex items-center justify-between gap-2 min-w-0 sm:contents">
+          {/* Resources Cluster */}
+          <div className="flex items-center gap-2 sm:gap-3 lg:gap-4 font-mono-num shrink-0 sm:order-1">
+            <div className="flex items-center gap-1" title="Золото / Руда">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <circle cx="8" cy="8" r="6" fill="#eab308" stroke="#fef08a" strokeWidth="1.2" />
+              </svg>
+              <span className="font-semibold text-[#facc15]">{hud.resources.gold}</span>
+            </div>
+            <div className="flex items-center gap-1" title="Древесина">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M8 2L13 11H3L8 2Z" fill="#65a30d" />
+                <rect x="7" y="11" width="2" height="3" fill="#78350f" />
+              </svg>
+              <span className="font-semibold text-[#a3e635]">{hud.resources.wood}</span>
+            </div>
+            <div className="flex items-center gap-1" title="Камень">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <polygon points="3,13 5,5 11,4 14,13" fill="#94a3b8" />
+              </svg>
+              <span className="font-semibold text-[#cbd5e1]">{hud.resources.stone}</span>
+            </div>
+            <div className="hidden sm:flex items-center gap-1 text-[#d6cfc0]" title="Лимит армии">
+              <span className="text-[#8f8879]">Отр</span>
+              <span className="font-semibold">
+                {hud.popUsed}/{hud.popCap}
               </span>
-              <span
-                className={
-                  v14.magicStrainStatus === 'critical'
-                    ? 'text-[#f87171]'
-                    : v14.magicStrainStatus === 'elevated'
-                    ? 'text-[#fbbf24]'
-                    : 'text-[#86efac]'
-                }
+            </div>
+            {v14 && (
+              <div
+                className="hidden lg:flex items-center gap-3 pl-2 border-l border-[#2a3142] text-[11px]"
+                title="Магические показатели и казна Аватара"
               >
-                Нагрузка {v14.magicStrainIndex}
-              </span>
-              <span className="text-[#facc15]">{v14.currencyTextRu}</span>
-            </div>
-          )}
-        </div>
-
-        {/* Active Objective Dropdown Trigger */}
-        <div className="relative min-w-0">
-          <button
-            type="button"
-            onClick={() => setShowObjectives((s) => !s)}
-            className="flex items-center gap-2 px-2.5 py-1.5 rounded bg-[#181c26] hover:bg-[#202634] border border-[#c49a45]/35 text-[#eae3d2] cursor-pointer max-w-[165px] sm:max-w-xs"
-          >
-            <span className="text-[11px] font-mono-num text-[#c49a45] shrink-0">
-              {completedCount}/{hud.objectives.length}
-            </span>
-            <span className="truncate text-xs font-medium">{currentObj?.title}</span>
-          </button>
-
-          {showObjectives && (
-            <div className="absolute right-0 sm:left-1/2 sm:-translate-x-1/2 mt-2 w-72 sm:w-80 bg-[#12151e] border border-[#c49a45]/45 rounded-md p-3.5 shadow-2xl z-30">
-              <div className="flex items-center justify-between mb-2 pb-1.5 border-b border-[#252b38]">
-                <span className="font-display text-sm font-bold text-[#eae3d2]">
-                  Задачи сектора
+                <span className="text-[#38bdf8]">
+                  Мана {v14.heroMana}/{v14.heroMaxMana}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => setShowObjectives(false)}
-                  className="text-xs text-[#9e9788] hover:text-[#eae3d2] cursor-pointer"
+                <span
+                  className={
+                    v14.magicStrainStatus === 'critical'
+                      ? 'text-[#f87171]'
+                      : v14.magicStrainStatus === 'elevated'
+                      ? 'text-[#fbbf24]'
+                      : 'text-[#86efac]'
+                  }
                 >
-                  Закрыть
-                </button>
+                  Нагрузка {v14.magicStrainIndex}
+                </span>
+                <span className="text-[#facc15]">{v14.currencyTextRu}</span>
               </div>
-              <ul className="flex flex-col gap-2">
-                {hud.objectives.map((obj, idx) => (
-                  <li key={obj.id} className="flex items-start justify-between gap-2 text-xs">
-                    <span className={obj.completed ? 'text-[#4ade80] line-through' : 'text-[#eae3d2]'}>
-                      {idx + 1}. {obj.title}
-                    </span>
-                    <span className="font-mono-num text-[11px] text-[#9e9788] shrink-0">
-                      {obj.progressText}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+            )}
+          </div>
+
+          {/* System Controls */}
+          <div className="flex items-center gap-1.5 shrink-0 sm:order-3">
+            <button
+              type="button"
+              onClick={onOpenV14Slice}
+              className="min-h-[44px] sm:min-h-[34px] px-2.5 py-1 rounded bg-[#1c2231] hover:bg-[#252d42] border border-[#c49a45]/50 text-[#facc15] font-semibold cursor-pointer whitespace-nowrap flex items-center gap-1.5"
+            >
+              <span className="hidden lg:inline">Лист героя</span>
+              <span className="lg:hidden">Герой</span>
+              {v14 && v14.unspentTotal > 0 && (
+                <span className="px-1.5 py-0.5 rounded bg-[#c49a45] text-[#101218] text-[10px] font-mono-num font-bold leading-none">
+                  +{v14.unspentTotal}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={onToggleMute}
+              className="hidden sm:inline-flex items-center min-h-[34px] px-2 lg:px-2.5 py-1 rounded bg-[#181c26] hover:bg-[#222836] border border-[#2d3444] text-[#d6cfc0] cursor-pointer whitespace-nowrap"
+            >
+              {hud.muted ? 'Без звука' : 'Звук'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowCombatLog((v) => !v)}
+              className={`hidden sm:inline-flex items-center min-h-[34px] px-2 lg:px-2.5 py-1 rounded border text-xs cursor-pointer whitespace-nowrap ${
+                showCombatLog
+                  ? 'bg-[#242c3e] border-[#c49a45]/60 text-[#facc15]'
+                  : 'bg-[#181c26] hover:bg-[#222836] border-[#2d3444] text-[#d6cfc0]'
+              }`}
+            >
+              Журнал
+            </button>
+            <button
+              type="button"
+              onClick={onSave}
+              className="hidden lg:inline-flex items-center min-h-[34px] px-2.5 py-1 rounded bg-[#181c26] hover:bg-[#222836] border border-[#2d3444] text-[#d6cfc0] cursor-pointer whitespace-nowrap"
+            >
+              Сохранить
+            </button>
+            <button
+              type="button"
+              onClick={onPause}
+              className="min-h-[44px] sm:min-h-[34px] px-2.5 py-1 rounded bg-[#181c26] hover:bg-[#222836] border border-[#c49a45]/40 text-[#eae3d2] cursor-pointer whitespace-nowrap"
+            >
+              Меню
+            </button>
+          </div>
         </div>
 
-        {/* System Controls */}
-        <div className="flex items-center gap-1.5 shrink-0">
-          <button
-            type="button"
-            onClick={onOpenV14Slice}
-            className="min-h-[34px] px-2.5 py-1 rounded bg-[#1c2231] hover:bg-[#252d42] border border-[#c49a45]/50 text-[#facc15] font-semibold cursor-pointer whitespace-nowrap flex items-center gap-1.5"
-          >
-            <span className="hidden sm:inline">Лист героя</span>
-            <span className="sm:hidden">Герой</span>
-            {v14 && v14.unspentTotal > 0 && (
-              <span className="px-1.5 py-0.5 rounded bg-[#c49a45] text-[#101218] text-[10px] font-mono-num font-bold leading-none">
-                +{v14.unspentTotal}
+        {/* Row 2 (mobile) / Center Objectives cluster (sm+) + Mobile Journal & Army Controls Triggers */}
+        <div className="flex items-center gap-1.5 min-w-0 sm:flex-1 sm:justify-center sm:order-2">
+          <div className="relative flex-1 min-w-0 sm:flex-initial sm:max-w-[230px] lg:max-w-xs">
+            <button
+              type="button"
+              onClick={() => setShowObjectives((s) => !s)}
+              className="w-full min-h-[44px] sm:min-h-[34px] flex items-center gap-1.5 sm:gap-2 px-2.5 py-1.5 rounded bg-[#181c26] hover:bg-[#202634] border border-[#c49a45]/35 text-[#eae3d2] cursor-pointer"
+            >
+              <span className="text-[11px] font-mono-num text-[#c49a45] shrink-0">
+                {completedCount}/{hud.objectives.length}
               </span>
+              <span className="truncate text-xs font-medium text-left">{currentObj?.title}</span>
+            </button>
+
+            {showObjectives && (
+              <div className="absolute left-0 sm:left-1/2 sm:-translate-x-1/2 mt-2 w-[min(18rem,calc(100vw-1rem))] sm:w-80 bg-[#12151e] border border-[#c49a45]/45 rounded-md p-3.5 shadow-2xl z-30">
+                <div className="flex items-center justify-between mb-2 pb-1.5 border-b border-[#252b38]">
+                  <span className="font-display text-sm font-bold text-[#eae3d2]">
+                    Задачи сектора
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowObjectives(false)}
+                    className="min-h-[36px] px-2 text-xs text-[#9e9788] hover:text-[#eae3d2] cursor-pointer"
+                  >
+                    Закрыть
+                  </button>
+                </div>
+                <ul className="flex flex-col gap-2">
+                  {hud.objectives.map((obj, idx) => (
+                    <li key={obj.id} className="flex items-start justify-between gap-2 text-xs">
+                      <span
+                        className={obj.completed ? 'text-[#4ade80] line-through' : 'text-[#eae3d2]'}
+                      >
+                        {idx + 1}. {obj.title}
+                      </span>
+                      <span className="font-mono-num text-[11px] text-[#9e9788] shrink-0">
+                        {obj.progressText}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
-          </button>
-          <button
-            type="button"
-            onClick={onToggleMute}
-            className="hidden sm:inline-flex items-center min-h-[34px] px-2.5 py-1 rounded bg-[#181c26] hover:bg-[#222836] border border-[#2d3444] text-[#d6cfc0] cursor-pointer whitespace-nowrap"
-          >
-            {hud.muted ? 'Без звука' : 'Звук'}
-          </button>
+          </div>
+
+          {/* Mobile-only compact entry points for Combat Log & Squad Groups/Formations (DEF-03) */}
           <button
             type="button"
             onClick={() => setShowCombatLog((v) => !v)}
-            className={`hidden sm:inline-flex items-center min-h-[34px] px-2.5 py-1 rounded border text-xs cursor-pointer whitespace-nowrap ${
+            className={`sm:hidden shrink-0 min-h-[44px] px-2.5 rounded border text-xs font-medium cursor-pointer whitespace-nowrap ${
               showCombatLog
                 ? 'bg-[#242c3e] border-[#c49a45]/60 text-[#facc15]'
-                : 'bg-[#181c26] hover:bg-[#222836] border-[#2d3444] text-[#d6cfc0]'
+                : 'bg-[#181c26] border-[#2d3444] text-[#d6cfc0]'
             }`}
           >
             Журнал
           </button>
           <button
             type="button"
-            onClick={onSave}
-            className="hidden md:inline-flex items-center min-h-[34px] px-2.5 py-1 rounded bg-[#181c26] hover:bg-[#222836] border border-[#2d3444] text-[#d6cfc0] cursor-pointer whitespace-nowrap"
+            onClick={() => setMobileDrawer((d) => (d === 'army' ? 'none' : 'army'))}
+            className={`md:hidden shrink-0 min-h-[44px] sm:min-h-[34px] px-2.5 rounded border text-xs font-semibold cursor-pointer whitespace-nowrap ${
+              mobileDrawer === 'army'
+                ? 'bg-[#c49a45] border-[#c49a45] text-[#101218]'
+                : 'bg-[#181c26] border-[#c49a45]/40 text-[#eae3d2]'
+            }`}
           >
-            Сохранить
-          </button>
-          <button
-            type="button"
-            onClick={onPause}
-            className="min-h-[34px] px-2.5 py-1 rounded bg-[#181c26] hover:bg-[#222836] border border-[#c49a45]/40 text-[#eae3d2] cursor-pointer whitespace-nowrap"
-          >
-            Меню
+            Строй
           </button>
         </div>
       </header>
 
-      {/* Center Top Notification, Respawn Notice & Build Mode Banner */}
-      <div className="flex flex-col items-center gap-1.5 mt-2 px-3">
+      {/* Center Top Notification, Respawn Notice & Build Mode Banner (padded away from right zoom bar — DEF-05 & DEF-07) */}
+      <div className="flex flex-col items-center gap-1.5 mt-2 pl-2.5 pr-[68px] sm:px-16">
         {v14 && v14.avatarRespawnSec > 0 && (
-          <div className="px-4 py-1.5 rounded bg-[#1a1322]/96 border border-[#38bdf8]/60 text-xs sm:text-sm text-[#bae6fd] shadow-lg text-center font-mono-num">
+          <div className="max-w-full px-3.5 py-1.5 rounded bg-[#1a1322]/96 border border-[#38bdf8]/60 text-xs sm:text-sm text-[#bae6fd] shadow-lg text-center font-mono-num">
             Аватар возрождается у Камня Душ: {v14.avatarRespawnSec} с
             {v14.activeMinionsCount > 0
               ? ` · Автономность нежити: ${v14.residualAutonomyPool}`
@@ -302,7 +342,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           </div>
         )}
         {hud.buildMode && (
-          <div className="pointer-events-auto flex items-center gap-3 px-4 py-1.5 rounded bg-[#12161f]/96 border border-[#c49a45] text-xs text-[#eae3d2] shadow-lg">
+          <div className="pointer-events-auto max-w-full flex flex-wrap items-center justify-center gap-2 px-3.5 py-1.5 rounded bg-[#12161f]/96 border border-[#c49a45] text-xs text-[#eae3d2] shadow-lg">
             <span>
               Постройка: <strong>{BUILDING_LABELS_RU[hud.buildMode]}</strong> — выберите свободную
               клетку
@@ -310,24 +350,24 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             <button
               type="button"
               onClick={() => onToggleBuildMode(null)}
-              className="px-2 py-0.5 bg-[#7f1d1d] hover:bg-[#991b1b] text-white rounded cursor-pointer"
+              className="min-h-[36px] sm:min-h-[28px] px-2.5 py-0.5 bg-[#7f1d1d] hover:bg-[#991b1b] text-white rounded cursor-pointer"
             >
               Отмена
             </button>
           </div>
         )}
-        {hud.bannerMessage && (
-          <div className="px-4 py-1.5 rounded bg-[#11141c]/96 border border-[#c49a45]/40 text-xs sm:text-sm text-[#f3ead8] shadow-lg text-center">
+        {hud.bannerMessage && !isDuplicateRespawnBanner && (
+          <div className="max-w-full px-3.5 py-1.5 rounded bg-[#11141c]/96 border border-[#c49a45]/40 text-xs sm:text-sm text-[#f3ead8] shadow-lg text-center">
             {hud.bannerMessage}
           </div>
         )}
       </div>
 
-      {/* Collapsible Live Combat & Event Log */}
+      {/* Collapsible Live Combat & Event Log (safe positioning below mobile 2-row header — DEF-03, DEF-05) */}
       {showCombatLog && v14 && (
         <div
           onPointerDown={(e) => e.stopPropagation()}
-          className="pointer-events-auto fixed left-2.5 top-14 z-20 w-72 max-w-[85vw] bg-[#10131a]/96 border border-[#c49a45]/40 rounded-md p-2.5 shadow-xl"
+          className="pointer-events-auto fixed left-2.5 right-[68px] sm:right-auto top-[112px] sm:top-14 z-20 sm:w-72 bg-[#10131a]/96 border border-[#c49a45]/40 rounded-md p-2.5 shadow-xl"
         >
           <div className="flex items-center justify-between pb-1 mb-1.5 border-b border-[#252b38]">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-[#c49a45]">
@@ -336,7 +376,8 @@ export const GameHUD: React.FC<GameHUDProps> = ({
             <button
               type="button"
               onClick={() => setShowCombatLog(false)}
-              className="text-[11px] text-[#9e9788] hover:text-[#eae3d2] cursor-pointer"
+              aria-label="Закрыть журнал боя"
+              className="min-h-[32px] min-w-[32px] text-xs text-[#9e9788] hover:text-[#eae3d2] cursor-pointer"
             >
               ✕
             </button>
@@ -355,11 +396,11 @@ export const GameHUD: React.FC<GameHUDProps> = ({
         </div>
       )}
 
-      {/* Fixed Camera Controls (Zoom In, Zoom Out, Reset Camera) */}
+      {/* Fixed Camera Controls (Zoom In, Zoom Out, Reset Camera — offset below mobile 2-row header) */}
       <div
         onPointerDown={(e) => e.stopPropagation()}
         onTouchStart={(e) => e.stopPropagation()}
-        className="pointer-events-auto fixed right-2.5 top-12 sm:top-14 z-20 flex flex-col items-center gap-1 bg-[#10131a]/96 border border-[#c49a45]/35 rounded-md p-1 shadow-xl"
+        className="pointer-events-auto fixed right-2 top-[112px] sm:right-2.5 sm:top-14 z-20 flex flex-col items-center gap-1 bg-[#10131a]/96 border border-[#c49a45]/35 rounded-md p-1 shadow-xl"
       >
         <button
           type="button"
@@ -836,7 +877,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
                     <button
                       type="button"
                       onClick={onOpenInventory}
-                      className="min-h-[38px] px-2.5 bg-[#1d2230] border border-[#c49a45]/50 rounded text-xs font-semibold text-[#eae3d2]"
+                      className="min-h-[44px] px-2.5 bg-[#1d2230] border border-[#c49a45]/50 rounded text-xs font-semibold text-[#eae3d2] whitespace-nowrap"
                     >
                       Рюкзак ({v14?.corePartyInventory.length ?? hud.inventory.length})
                     </button>
@@ -965,7 +1006,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               <button
                 type="button"
                 onClick={() => setMobileDrawer('none')}
-                className="min-h-[40px] px-2.5 text-xs text-[#9e9788]"
+                className="min-h-[44px] px-2.5 text-xs text-[#9e9788]"
               >
                 Закрыть
               </button>
@@ -1029,6 +1070,148 @@ export const GameHUD: React.FC<GameHUDProps> = ({
           </div>
         )}
 
+        {mobileDrawer === 'army' && v14 && (
+          <div className="pointer-events-auto bg-[#10131a]/96 border border-[#c49a45]/45 rounded-md p-3 flex flex-col gap-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-display text-sm font-bold text-[#eae3d2]">
+                Группы, строй и приказы
+              </span>
+              <button
+                type="button"
+                onClick={() => setMobileDrawer('none')}
+                className="min-h-[44px] px-2.5 text-xs text-[#9e9788]"
+              >
+                Закрыть
+              </button>
+            </div>
+
+            {/* 6 Control Groups with touch-friendly Select / Assign mode toggle (§292.7) */}
+            <div className="flex flex-col gap-1.5">
+              <div className="flex items-center justify-between gap-2 text-[11px]">
+                <span className="text-[#9e9788]">Группы отряда (1–6)</span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setMobileGroupAssignMode(false)}
+                    className={`min-h-[36px] px-2 rounded text-[11px] font-semibold border ${
+                      !mobileGroupAssignMode
+                        ? 'bg-[#c49a45] text-[#101218] border-[#c49a45]'
+                        : 'bg-[#181c26] text-[#d6cfc0] border-[#2e3545]'
+                    }`}
+                  >
+                    Выбрать
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMobileGroupAssignMode(true)}
+                    className={`min-h-[36px] px-2 rounded text-[11px] font-semibold border ${
+                      mobileGroupAssignMode
+                        ? 'bg-[#c49a45] text-[#101218] border-[#c49a45]'
+                        : 'bg-[#181c26] text-[#d6cfc0] border-[#2e3545]'
+                    }`}
+                  >
+                    Назначить
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-6 gap-1.5">
+                {CONTROL_SLOTS.map((slot) => {
+                  const count = v14.controlGroupCounts[slot] ?? 0;
+                  return (
+                    <button
+                      key={slot}
+                      type="button"
+                      aria-label={
+                        mobileGroupAssignMode
+                          ? `Назначить группу ${slot}`
+                          : `Выбрать группу ${slot}`
+                      }
+                      onClick={() => {
+                        if (mobileGroupAssignMode) {
+                          onAssignControlGroup(slot);
+                          setMobileGroupAssignMode(false);
+                        } else {
+                          onRecallControlGroup(slot);
+                        }
+                      }}
+                      className={`min-h-[44px] rounded border text-xs font-mono-num font-semibold ${
+                        count > 0
+                          ? 'bg-[#1f2636] border-[#c49a45]/60 text-[#facc15]'
+                          : 'bg-[#151922] border-[#262d3c] text-[#8f96a8]'
+                      }`}
+                    >
+                      {slot}
+                      {count > 0 ? `(${count})` : ''}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Squad Formations (§292.10) */}
+            <div className="flex flex-col gap-1.5 pt-2 border-t border-[#232938]">
+              <div className="flex items-center justify-between text-[11px] text-[#9e9788]">
+                <span>Формация отряда</span>
+                {!v14.canUseFormation && (
+                  <span className="text-[#fbbf24]">Выберите войска</span>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-1.5">
+                {FORMATIONS.map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    disabled={!v14.canUseFormation}
+                    title={v14.formationReasonRu ?? `Построение: ${f.label}`}
+                    onClick={() => onSetFormation(f.id)}
+                    className={`min-h-[44px] px-2 rounded text-xs font-semibold border disabled:opacity-40 ${
+                      v14.activeFormation === f.id
+                        ? 'bg-[#c49a45] text-[#101218] border-[#c49a45]'
+                        : 'bg-[#181c26] text-[#d6cfc0] border-[#2e3545]'
+                    }`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Squad Quick Orders */}
+            <div className="grid grid-cols-3 gap-1.5 pt-2 border-t border-[#232938]">
+              <button
+                type="button"
+                onClick={() => {
+                  onCommand('follow_hero');
+                  setMobileDrawer('none');
+                }}
+                className="min-h-[44px] px-2 bg-[#181c26] border border-[#2f3647] rounded text-xs font-medium text-[#eae3d2]"
+              >
+                За Аватаром
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onCommand('attack_move_forward');
+                  setMobileDrawer('none');
+                }}
+                className="min-h-[44px] px-2 bg-[#2a1719] border border-[#7f1d1d] rounded text-xs font-medium text-[#fca5a5]"
+              >
+                На восток
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onCommand('stop');
+                  setMobileDrawer('none');
+                }}
+                className="min-h-[44px] px-2 bg-[#181c26] border border-[#2f3647] rounded text-xs font-medium text-[#eae3d2]"
+              >
+                Удерживать
+              </button>
+            </div>
+          </div>
+        )}
+
         {mobileDrawer === 'map' && (
           <div className="pointer-events-auto bg-[#10131a]/96 border border-[#c49a45]/45 rounded-md p-3 flex flex-col items-center gap-2">
             <div className="w-full flex items-center justify-between">
@@ -1036,7 +1219,7 @@ export const GameHUD: React.FC<GameHUDProps> = ({
               <button
                 type="button"
                 onClick={() => setMobileDrawer('none')}
-                className="min-h-[40px] px-2.5 text-xs text-[#9e9788]"
+                className="min-h-[44px] px-2.5 text-xs text-[#9e9788]"
               >
                 Закрыть
               </button>

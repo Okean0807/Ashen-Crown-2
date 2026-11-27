@@ -68,6 +68,16 @@ const SLOT_THEME: Record<
   },
 };
 
+const SLOT_EMPTY_HINT_RU: Record<EquipSlotId, string> = {
+  main_hand: 'Оружие не надето',
+  off_hand: 'Щит или предмет не надет',
+  armor: 'Нагрудник не надет',
+  helm: 'Шлем не надет',
+  amulet: 'Амулет не надет',
+  ring_1: 'Кольцо не надето',
+  ring_2: 'Кольцо не надето',
+};
+
 const STRAIN_LABELS_RU: Record<'normal' | 'elevated' | 'critical', { text: string; cls: string }> =
   {
     normal: { text: 'Спокойна', cls: 'text-[#5eead4]' },
@@ -283,7 +293,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
             <button
               type="button"
               onClick={onOpenV14Slice}
-              className="min-h-[40px] px-2.5 sm:px-3 py-1.5 bg-[#1e2536] hover:bg-[#283148] border border-[#c49a45]/45 text-[#f4cf6a] text-xs font-semibold rounded cursor-pointer whitespace-nowrap"
+              className="min-h-[44px] sm:min-h-[40px] px-2.5 sm:px-3 py-1.5 bg-[#1e2536] hover:bg-[#283148] border border-[#c49a45]/45 text-[#f4cf6a] text-xs font-semibold rounded cursor-pointer whitespace-nowrap"
             >
               Лист героя
             </button>
@@ -291,12 +301,22 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
               type="button"
               onClick={onClose}
               aria-label="Закрыть инвентарь"
-              className="min-h-[40px] min-w-[40px] px-2.5 py-1.5 bg-[#1a1f2b] hover:bg-[#252c3c] border border-[#2f3749] text-[#e6dfd0] text-xs font-medium rounded cursor-pointer"
+              className="min-h-[44px] min-w-[44px] sm:min-h-[40px] sm:min-w-[40px] px-2.5 py-1.5 bg-[#1a1f2b] hover:bg-[#252c3c] border border-[#2f3749] text-[#e6dfd0] text-xs font-medium rounded cursor-pointer"
             >
               ✕
             </button>
           </div>
         </div>
+
+        {/* Live Action Feedback Banner inside Modal (DEF-04) */}
+        {hud.bannerMessage && (
+          <div
+            role="status"
+            className="px-3.5 py-2 sm:px-5 bg-[#241b12] border-b border-[#c49a45]/45 text-xs text-[#fde68a] shrink-0"
+          >
+            {hud.bannerMessage}
+          </div>
+        )}
 
         {/* Scrollable Body */}
         <div className="p-3.5 sm:p-5 flex flex-col gap-4 overflow-y-auto custom-scroll">
@@ -389,7 +409,7 @@ export const InventoryModal: React.FC<InventoryModalProps> = ({
                         {eq.nameRu ?? 'Пустая ячейка'}
                       </div>
                       <div className="text-[11px] text-[#9e9788] mt-0.5 truncate">
-                        {eq.nameRu ? eq.bonusesRu : theme.emptyHintRu}
+                        {eq.nameRu ? eq.bonusesRu : SLOT_EMPTY_HINT_RU[eq.slot] ?? theme.emptyHintRu}
                       </div>
                     </div>
                   </div>
@@ -685,6 +705,8 @@ export const VictoryDefeatModal: React.FC<EndModalProps> = ({ hud, onRestart, on
 
 interface PauseModalProps {
   hasSavedGame: boolean;
+  diagnosticsEnabled?: boolean;
+  onToggleDiagnostics?: () => void;
   onResume: () => void;
   onSave: () => void;
   onLoad: () => void;
@@ -696,6 +718,8 @@ interface PauseModalProps {
 
 export const PauseModal: React.FC<PauseModalProps> = ({
   hasSavedGame,
+  diagnosticsEnabled = false,
+  onToggleDiagnostics,
   onResume,
   onSave,
   onLoad,
@@ -745,6 +769,19 @@ export const PauseModal: React.FC<PauseModalProps> = ({
       >
         Лист героя и мир
       </button>
+      {onToggleDiagnostics && (
+        <button
+          type="button"
+          onClick={onToggleDiagnostics}
+          className={`min-h-[44px] w-full font-medium text-xs rounded border cursor-pointer ${
+            diagnosticsEnabled
+              ? 'bg-[#2a2315] border-[#c49a45]/60 text-[#facc15]'
+              : 'bg-[#151923] hover:bg-[#1e2433] border-[#293040] text-[#9e9788]'
+          }`}
+        >
+          Диагностика: {diagnosticsEnabled ? 'Вкл' : 'Выкл'}
+        </button>
+      )}
       <button
         type="button"
         onClick={onRestart}

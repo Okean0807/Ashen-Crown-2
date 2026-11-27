@@ -81,54 +81,56 @@ function tileHash(gx: number, gy: number, salt = 0): number {
 }
 
 function terrainAlbedoHex(terrain: TerrainType, gx: number, gy: number): [number, number, number] {
-  const macro = (Math.sin(gx * 0.34 + gy * 0.27) * 0.5 + Math.cos(gx * 0.19 - gy * 0.41) * 0.5) * 0.032;
-  const micro = (tileHash(gx, gy, 11) - 0.5) * 0.042;
+  const macro =
+    (Math.sin(gx * 0.34 + gy * 0.27) * 0.5 + Math.cos(gx * 0.19 - gy * 0.41) * 0.5) * 0.014;
+  const micro = (tileHash(gx, gy, 11) - 0.5) * 0.02;
   const n = macro + micro;
-  let r = 0.28;
-  let g = 0.43;
-  let b = 0.22;
+  // Calibrated linear-RGB albedos for Three.js r160+ PBR pipeline (prevents washed-out pastel grass)
+  let r = 0.075;
+  let g = 0.168;
+  let b = 0.048;
   switch (terrain) {
     case 'water':
-      r = 0.07;
-      g = 0.21;
-      b = 0.28;
+      r = 0.022;
+      g = 0.088;
+      b = 0.135;
       break;
     case 'bridge':
-      r = 0.48;
-      g = 0.4;
-      b = 0.31;
+      r = 0.21;
+      g = 0.145;
+      b = 0.088;
       break;
     case 'stone_road':
-      r = 0.5;
-      g = 0.48;
-      b = 0.44;
+      r = 0.215;
+      g = 0.205;
+      b = 0.18;
       break;
     case 'ruin_floor':
-      r = 0.38;
-      g = 0.42;
-      b = 0.37;
+      r = 0.14;
+      g = 0.165;
+      b = 0.13;
       break;
     case 'orc_dirt':
-      r = 0.38;
-      g = 0.26;
-      b = 0.19;
+      r = 0.15;
+      g = 0.085;
+      b = 0.05;
       break;
     case 'forest_floor':
-      r = 0.19;
-      g = 0.32;
-      b = 0.18;
+      r = 0.042;
+      g = 0.105;
+      b = 0.036;
       break;
     case 'grass':
     default:
-      r = 0.29;
-      g = 0.45;
-      b = 0.23;
+      r = 0.075;
+      g = 0.168;
+      b = 0.048;
       break;
   }
   return [
-    Math.min(1, Math.max(0.03, r + n)),
-    Math.min(1, Math.max(0.03, g + n * 0.95)),
-    Math.min(1, Math.max(0.03, b + n * 0.68)),
+    Math.min(1, Math.max(0.015, r + n)),
+    Math.min(1, Math.max(0.015, g + n * 1.1)),
+    Math.min(1, Math.max(0.015, b + n * 0.65)),
   ];
 }
 
@@ -217,7 +219,7 @@ export class IsoWorldRenderer3D {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, maxDpr));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.18;
+    this.renderer.toneMappingExposure = 1.06;
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
@@ -258,12 +260,12 @@ export class IsoWorldRenderer3D {
     this.models = new ModelLibrary3D(this.textures);
 
     // Cohesive Dark-Fantasy 3-Point Outdoor Lighting Rig
-    const hemi = new THREE.HemisphereLight(0xb2cef0, 0x3c372a, 0.92);
+    const hemi = new THREE.HemisphereLight(0xa8c6eb, 0x2d2b22, 0.74);
     this.scene.add(hemi);
 
     this.sunTarget = new THREE.Object3D();
     this.scene.add(this.sunTarget);
-    this.sunLight = new THREE.DirectionalLight(0xffe5ba, 2.45);
+    this.sunLight = new THREE.DirectionalLight(0xffe4b5, 2.08);
     this.sunLight.target = this.sunTarget;
     this.sunLight.castShadow = !this.isSoftwareGl;
     const shadowSize = this.isMobileProfile ? 1024 : 2048;
@@ -279,7 +281,7 @@ export class IsoWorldRenderer3D {
     this.sunLight.shadow.normalBias = 0.025;
     this.scene.add(this.sunLight);
 
-    const rimLight = new THREE.DirectionalLight(0x7db3f5, 0.56);
+    const rimLight = new THREE.DirectionalLight(0x7db3f5, 0.46);
     rimLight.position.set(-28, 18, -24);
     this.scene.add(rimLight);
 
@@ -480,10 +482,10 @@ export class IsoWorldRenderer3D {
           if (!nb) continue;
           if (nb.terrain === 'water') {
             touchesWater = true;
-            // Damp earthy riverbank sand/pebble transition
-            r += 0.34 * 0.85;
-            g += 0.31 * 0.85;
-            b += 0.24 * 0.85;
+            // Damp earthy riverbank sand/pebble transition (linear RGB)
+            r += 0.13 * 0.85;
+            g += 0.115 * 0.85;
+            b += 0.08 * 0.85;
             weight += 0.85;
           } else if (!isArchitecturalTile(nb.terrain)) {
             const [nr, ng, nbCol] = terrainAlbedoHex(nb.terrain, tx, ty);
@@ -637,7 +639,12 @@ export class IsoWorldRenderer3D {
               tmpMat4.compose(tmpPos, tmpQuat, tmpScale);
               reedMatrices.push({
                 m: tmpMat4.clone(),
-                c: new THREE.Color().setRGB(0.32 + h2 * 0.1, 0.48 + h3 * 0.1, 0.2),
+                c: new THREE.Color().setRGB(
+                  0.3 + h2 * 0.08,
+                  0.44 + h3 * 0.1,
+                  0.18,
+                  THREE.SRGBColorSpace
+                ),
               });
             }
           }
@@ -657,9 +664,10 @@ export class IsoWorldRenderer3D {
               grassMatrices.push({
                 m: tmpMat4.clone(),
                 c: new THREE.Color().setRGB(
-                  isForest ? 0.22 + h3 * 0.08 : 0.3 + h3 * 0.12,
-                  isForest ? 0.38 + h2 * 0.1 : 0.5 + h2 * 0.12,
-                  0.17 + h1 * 0.06
+                  isForest ? 0.19 + h3 * 0.07 : 0.25 + h3 * 0.1,
+                  isForest ? 0.34 + h2 * 0.09 : 0.44 + h2 * 0.1,
+                  0.15 + h1 * 0.05,
+                  THREE.SRGBColorSpace
                 ),
               });
             }
@@ -680,7 +688,12 @@ export class IsoWorldRenderer3D {
             tmpMat4.compose(tmpPos, tmpQuat, tmpScale);
             shrubMatrices.push({
               m: tmpMat4.clone(),
-              c: new THREE.Color().setRGB(0.2 + h1 * 0.12, 0.4 + h3 * 0.14, 0.18 + h2 * 0.06),
+              c: new THREE.Color().setRGB(
+                0.18 + h1 * 0.1,
+                0.36 + h3 * 0.12,
+                0.15 + h2 * 0.05,
+                THREE.SRGBColorSpace
+              ),
             });
           }
 
@@ -699,10 +712,15 @@ export class IsoWorldRenderer3D {
             const s = 0.55 + h1 * 0.65;
             tmpScale.set(s * 1.25, s * 0.65, s);
             tmpMat4.compose(tmpPos, tmpQuat, tmpScale);
-            const tone = tile.terrain === 'orc_dirt' ? 0.34 : 0.5;
+            const tone = tile.terrain === 'orc_dirt' ? 0.34 : 0.48;
             pebbleMatrices.push({
               m: tmpMat4.clone(),
-              c: new THREE.Color().setRGB(tone + h1 * 0.1, tone + h1 * 0.08, tone + h1 * 0.06),
+              c: new THREE.Color().setRGB(
+                tone + h1 * 0.08,
+                tone + h1 * 0.07,
+                tone + h1 * 0.05,
+                THREE.SRGBColorSpace
+              ),
             });
           }
 
@@ -717,7 +735,12 @@ export class IsoWorldRenderer3D {
             tmpMat4.compose(tmpPos, tmpQuat, tmpScale);
             rootMatrices.push({
               m: tmpMat4.clone(),
-              c: new THREE.Color().setRGB(0.36 + h2 * 0.08, 0.25 + h3 * 0.06, 0.16),
+              c: new THREE.Color().setRGB(
+                0.34 + h2 * 0.08,
+                0.24 + h3 * 0.06,
+                0.15,
+                THREE.SRGBColorSpace
+              ),
             });
           }
         }
@@ -736,8 +759,9 @@ export class IsoWorldRenderer3D {
       map: this.textures.terrainDetail,
       bumpMap: this.textures.terrainBump,
       bumpScale: 0.075,
-      roughness: 0.87,
-      metalness: 0.03,
+      roughness: 0.92,
+      metalness: 0.02,
+      envMapIntensity: 0.42,
     });
     this.terrainMesh = new THREE.Mesh(terrainGeo, terrainMat);
     this.terrainMesh.receiveShadow = true;
@@ -794,10 +818,10 @@ export class IsoWorldRenderer3D {
       sp.setY(i, y);
 
       const hNorm = Math.min(1, Math.max(0, (y + 0.2) / 2.8));
-      // Forested dark valley near map edge transitioning to slate mountain rock
-      skirtColors[i * 3] = 0.16 + hNorm * 0.18;
-      skirtColors[i * 3 + 1] = 0.24 + hNorm * 0.12;
-      skirtColors[i * 3 + 2] = 0.18 + hNorm * 0.18;
+      // Forested dark valley near map edge transitioning to slate mountain rock (linear RGB)
+      skirtColors[i * 3] = 0.045 + hNorm * 0.085;
+      skirtColors[i * 3 + 1] = 0.085 + hNorm * 0.06;
+      skirtColors[i * 3 + 2] = 0.055 + hNorm * 0.095;
     }
     skirtGeo.setAttribute('color', new THREE.BufferAttribute(skirtColors, 3));
     skirtGeo.computeVertexNormals();
@@ -806,8 +830,9 @@ export class IsoWorldRenderer3D {
       map: this.textures.terrainDetail,
       bumpMap: this.textures.terrainBump,
       bumpScale: 0.08,
-      roughness: 0.92,
-      metalness: 0.04,
+      roughness: 0.94,
+      metalness: 0.03,
+      envMapIntensity: 0.4,
     });
     this.skirtMesh = new THREE.Mesh(skirtGeo, skirtMat);
     this.skirtMesh.position.set(MAP_SIZE * 0.5, 0, MAP_SIZE * 0.5);
@@ -1314,6 +1339,37 @@ export class IsoWorldRenderer3D {
     this.syncParticles(state.particles, state.tiles);
 
     this.renderer.render(this.scene, this.camera);
+  }
+
+  public getDiagnosticInfo(): {
+    webglState: 'OK (WebGL2)' | 'OK (WebGL1)' | 'CONTEXT LOST';
+    gpuRenderer: string;
+    isSoftwareGl: boolean;
+    effectiveDpr: number;
+    drawCalls: number;
+    triangles: number;
+    sceneMeshes3D: number;
+  } {
+    const gl = this.renderer.getContext();
+    const isLost = this.disposed || gl.isContextLost();
+    const isWebGL2 =
+      typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext;
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    const gpuRenderer = dbg ? String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) ?? '') : '';
+
+    return {
+      webglState: isLost ? 'CONTEXT LOST' : isWebGL2 ? 'OK (WebGL2)' : 'OK (WebGL1)',
+      gpuRenderer,
+      isSoftwareGl: this.isSoftwareGl,
+      effectiveDpr: this.renderer.getPixelRatio(),
+      drawCalls: this.renderer.info.render.calls,
+      triangles: this.renderer.info.render.triangles,
+      sceneMeshes3D:
+        this.propRigs.size +
+        this.buildingRigs.size +
+        this.unitRigs.size +
+        this.projectileMeshes.size,
+    };
   }
 
   /**

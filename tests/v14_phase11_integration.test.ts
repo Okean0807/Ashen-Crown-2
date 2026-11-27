@@ -442,3 +442,175 @@ test('T-V14-53: Сохранение и загрузка кампании (ра�
   }
 });
 
+test('T-V14-54 (Phase 11.2 DEF-02): Корректная атрибуция союзных и вражеских снарядов в боевом журнале (стрелок врага, погибший стрелок, башня, союзный лучник, Аватар)', () => {
+  const engine = new GameEngine();
+  engine.initNewWorld(true);
+
+  const swordsman = engine.units.find((u) => u.faction === 'human' && u.type === 'swordsman')!;
+  const enemyArcher = engine.units.find((u) => u.faction === 'orc' && u.type === 'orc_archer')!;
+  const enemyWarrior = engine.units.find((u) => u.faction === 'orc' && u.type === 'orc_warrior')!;
+  const hero = engine.getHero()!;
+  assert.ok(swordsman && enemyArcher && enemyWarrior && hero);
+
+  // 1. Вражеский стрелок выпускает снаряд по мечнику (и даже погибает до прилёта стрелы)
+  engine.core.combatLog.length = 0;
+  swordsman.hp = swordsman.maxHp;
+  enemyArcher.x = swordsman.x + 3.2;
+  enemyArcher.y = swordsman.y;
+  enemyArcher.atkTimer = 0;
+  enemyArcher.order = 'attack_unit';
+  enemyArcher.targetUnitId = swordsman.id;
+
+  // Один тик — стрелок врага выпускает снаряд
+  engine.update(0.05);
+  const orcProj = engine.projectiles.find((p) => p.faction === 'orc');
+  assert.ok(orcProj, 'Стрелок врага должен выпустить вражеский снаряд');
+  assert.equal(orcProj!.attackerId, enemyArcher.id);
+  assert.equal(orcProj!.attackerName, enemyArcher.name);
+
+  // Удаляем стрелка врага до прилёта снаряда — атрибуция должна сохраниться по attackerName
+  engine.units = engine.units.filter((u) => u.id !== enemyArcher.id);
+  for (let i = 0; i < 20 && engine.projectiles.length > 0; i++) {
+    engine.update(0.08);
+  }
+  const enemyLogEntries = engine.getHudSnapshot().v14Core?.combatLog ?? [];
+  assert.ok(
+    enemyLogEntries.some((e) => e.text.startsWith(`${enemyArcher.name} → ${swordsman.name}:`)),
+    `Журнал боя должен атрибутировать выстрел вражескому стрелку, а получено: ${enemyLogEntries.map((e) => e.text).join(' | ')}`
+  );
+  assert.equal(
+    enemyLogEntries.some((e) => e.text.startsWith(`Союзник → ${swordsman.name}:`)),
+    false,
+    'Вражеский снаряд никогда не должен отображаться как атака «Союзник»'
+  );
+
+  // 2. Снаряд вражеской башни по мечнику
+  const orcTower = engine.buildings.find((b) => b.faction === 'orc' && b.type === 'orc_tower');
+  assert.ok(orcTower, 'На карте должна существовать башня врага');
+  engine.core.combatLog.length = 0;
+  swordsman.x = orcTower!.gx + 2.5;
+  swordsman.y = orcTower!.gy + 0.5;
+  swordsman.hp = swordsman.maxHp;
+  orcTower!.attackTimer = 0;
+  engine.update(0.05);
+  const towerProj = engine.projectiles.find((p) => p.attackerId === orcTower!.id);
+  assert.ok(towerProj, 'Башня врага должна выпустить снаряд со своим attackerId');
+  assert.equal(towerProj!.attackerName, orcTower!.name);
+  for (let i = 0; i < 20 && engine.projectiles.length > 0; i++) {
+    engine.update(0.08);
+  }
+  const towerLogs = engine.getHudSnapshot().v14Core?.combatLog ?? [];
+  assert.ok(
+    towerLogs.some((e) => e.text.startsWith(`${orcTower!.name} → ${swordsman.name}:`)),
+    `Выстрел башни врага должен атрибутироваться башне, а получено: ${towerLogs.map((e) => e.text).join(' | ')}`
+  );
+  assert.equal(
+    towerLogs.some((e) => e.text.startsWith(`Союзник → ${swordsman.name}:`)),
+    false
+  );
+
+  // 3. Союзный лучник стреляет по врагу — атрибутируется «Лучник», а не «Аватар»
+  const alliedArcher: typeof swordsman = {
+    ...swordsman,
+    id: 'test_allied_archer',
+    type: 'archer',
+    name: 'Лучник',
+    isRanged: true,
+    range: 5.8,
+    atkTimer: 0,
+    x: enemyWarrior.x - 3.5,
+    y: enemyWarrior.y,
+    order: 'attack_unit',
+    targetUnitId: enemyWarrior.id,
+  };
+  engine.units.push(alliedArcher);
+  engine.core.combatLog.length = 0;
+  enemyWarrior.hp = enemyWarrior.maxHp;
+  engine.update(0.05);
+  const allyProj = engine.projectiles.find((p) => p.attackerId === alliedArcher.id);
+  assert.ok(allyProj, 'Союзный лучник должен выпустить снаряд со своим attackerId');
+  assert.equal(allyProj!.attackerName, 'Лучник');
+  for (let i = 0; i < 20 && engine.projectiles.length > 0; i++) {
+    engine.update(0.08);
+  }
+  const allyLogs = engine.getHudSnapshot().v14Core?.combatLog ?? [];
+  assert.ok(
+    allyLogs.some((e) => e.text.startsWith(`Лучник → ${enemyWarrior.name}:`)),
+    `Выстрел союзного лучника должен атрибутироваться Лучнику, а получено: ${allyLogs.map((e) => e.text).join(' | ')}`
+  );
+
+  // 4. Огненный снаряд Аватара атрибутируется «Аватар»
+  engine.core.combatLog.length = 0;
+  enemyWarrior.hp = enemyWarrior.maxHp;
+  hero.x = enemyWarrior.x - 2.5;
+  hero.y = enemyWarrior.y;
+  engine.core.getAvatar().mana = engine.core.getAvatar().maxMana;
+  assert.equal(engine.castHeroSpell('spell_elem_fire_bolt'), true);
+  const fbProj = engine.projectiles.find((p) => p.kind === 'fireball');
+  assert.ok(fbProj && fbProj.attackerId === hero.id && fbProj.attackerName === hero.name);
+  for (let i = 0; i < 20 && engine.projectiles.length > 0; i++) {
+    engine.update(0.08);
+  }
+  const heroSpellLogs = engine.getHudSnapshot().v14Core?.combatLog ?? [];
+  assert.ok(
+    heroSpellLogs.some((e) => e.text.startsWith(`${hero.name} → ${enemyWarrior.name}:`)),
+    `Заклинание Аватара должно атрибутироваться Аватару, а получено: ${heroSpellLogs.map((e) => e.text).join(' | ')}`
+  );
+});
+
+test('T-V14-55 (Phase 11.2 DEF-04): Понятное уведомление с оставшимся временем при отказе equip/unequip/scroll у мёртвого Аватара и сохранение канона 120с возрождения (§288)', () => {
+  const engine = new GameEngine();
+  engine.initNewWorld(true);
+  const hero = engine.getHero()!;
+
+  const hudBefore = engine.getHudSnapshot();
+  const scrollItem = hudBefore.v14Core?.corePartyInventory.find((it) => it.isScroll);
+  const amuletItem = hudBefore.v14Core?.corePartyInventory.find(
+    (it) => it.targetSlot === 'amulet' && it.canEquip
+  );
+  assert.ok(scrollItem && amuletItem, 'В стартовом инвентаре должны быть свиток и доступный амулет');
+
+  // Смертельно раним Аватара -> каноническое возрождение 120с у Камня Душ (§288)
+  const deathRes = engine.core.applyDamageToAvatar(hero, hero.maxHp + 500);
+  assert.equal(deathRes.died, true);
+  assert.equal(deathRes.respawnSec, 120);
+  assert.ok((hero.deadTimer ?? 0) > 0);
+
+  // 1. Изучение свитка при мёртвом Аватаре -> отказ + понятный баннер с причиной и сроком
+  assert.equal(engine.transcribeCoreScroll(scrollItem!.instanceId), false);
+  const scrollBanner = engine.getHudSnapshot().bannerMessage ?? '';
+  assert.ok(
+    scrollBanner.includes('изучить свиток') && scrollBanner.includes('120 с'),
+    `Ожидалось понятное уведомление со сроком возрождения при изучении свитка, получено: "${scrollBanner}"`
+  );
+
+  // 2. Снятие предмета при мёртвом Аватаре -> отказ + понятный баннер
+  assert.equal(engine.unequipCoreSlot('main_hand'), false);
+  const unequipBanner = engine.getHudSnapshot().bannerMessage ?? '';
+  assert.ok(
+    unequipBanner.includes('снять снаряжение') && unequipBanner.includes('120 с'),
+    `Ожидалось понятное уведомление со сроком возрождения при снятии предмета, получено: "${unequipBanner}"`
+  );
+
+  // 3. Надевание предмета при мёртвом Аватаре -> отказ + понятный баннер
+  assert.equal(engine.equipCoreItem(amuletItem!.instanceId), false);
+  const equipBanner = engine.getHudSnapshot().bannerMessage ?? '';
+  assert.ok(
+    equipBanner.includes('надеть предмет') && equipBanner.includes('120 с'),
+    `Ожидалось понятное уведомление со сроком возрождения при надевании предмета, получено: "${equipBanner}"`
+  );
+
+  // 4. После канонического возрождения (120с) все 3 действия выполняются успешно
+  engine.core.tickCoreSimulation(120.5, hero);
+  engine.update(0.05);
+  assert.equal(
+    engine.core.getAvatar().deathState.respawnRemainingSec,
+    0,
+    'Аватар должен возродиться ровно через 120с'
+  );
+  assert.equal(engine.transcribeCoreScroll(scrollItem!.instanceId), true);
+  assert.equal(engine.unequipCoreSlot('main_hand'), true);
+  assert.equal(engine.equipCoreItem(amuletItem!.instanceId), true);
+});
+
+
