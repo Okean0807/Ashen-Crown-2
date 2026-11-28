@@ -42,7 +42,7 @@ export const DiagnosticsOverlay: React.FC<DiagnosticsOverlayProps> = ({ data, on
   return (
     <aside
       aria-label="Диагностическая панель"
-      className="fixed top-[114px] left-2 sm:top-14 sm:left-3 z-50 w-[256px] max-w-[calc(100vw-80px)] bg-[#0c1018]/94 border border-[#c49a45]/60 rounded-lg p-2.5 shadow-2xl text-[11px] leading-snug text-[#eae3d2] select-text"
+      className="fixed top-[114px] left-2 sm:top-14 sm:left-3 z-50 w-[256px] max-w-[calc(100vw-80px)] bg-[#0c1018]/94 border border-[#c49a45]/60 rounded-lg p-2.5 shadow-2xl text-[11px] leading-snug text-[#eae3d2] pointer-events-none"
     >
       <div className="flex items-center justify-between gap-2 pb-1.5 mb-1.5 border-b border-[#252c3b]">
         <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-[#c49a45]">
@@ -51,7 +51,7 @@ export const DiagnosticsOverlay: React.FC<DiagnosticsOverlayProps> = ({ data, on
         <button
           type="button"
           onClick={onClose}
-          className="min-h-[32px] px-2.5 py-0.5 bg-[#1b202d] hover:bg-[#262d3f] border border-[#323b4f] rounded text-[11px] font-medium text-[#eae3d2] cursor-pointer"
+          className="pointer-events-auto min-h-[32px] px-2.5 py-0.5 bg-[#1b202d] hover:bg-[#262d3f] border border-[#323b4f] rounded text-[11px] font-medium text-[#eae3d2] cursor-pointer"
         >
           Скрыть
         </button>

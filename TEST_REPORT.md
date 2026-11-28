@@ -1,7 +1,7 @@
 # TEST_REPORT.md — Отчёт о тестировании и проверках сборки ASHEN CROWN
 
-**Дата прогона:** 26.11.2026  
-**Среда:** Node.js `v22.23.5`, `tsx 4.21.0`, `typescript 7.0.2`, `vite 8.3.0`  
+**Дата прогона:** 28.11.2026 (Phase 11.3 Recovered Baseline)
+**Среда:** Node.js `v22.23.5`, `bun 1.4.5` (`--frozen-lockfile`), `tsx 4.23.15`, `typescript 7.0.2`, `vite 8.3.8`
 
 ---
 
@@ -10,10 +10,10 @@
 | Проверка | Команда | Результат | Подробности |
 |---|---|---|---|
 | **Автотесты (Node test runner)** | `npm test` (`tsx --test tests/*.test.ts`) | **PASS (57 / 57)** | `tests 57, pass 57, fail 0` (Срезы 1–10 + Этап 11 Playable Vertical Slice + Phase 11.2 регрессия `DEF-02`/`DEF-04` + legacy-регрессия) |
-| **Проверка типов TypeScript** | `npm run lint` (`tsc --noEmit`) | **PASS (exit code 0)** | Ошибок типизации нет |
-| **Production-сборка Vite** | `npm run build` (`vite build`) | **PASS** | `Build succeeded - the applet is compiled` |
-| **Проверка отсутствия `require(` в `src/`** | `! grep -rn 'require(' src` | **PASS (0 совпадений)** | Полная совместимость с ESM-сборкой Vite |
-| **Браузерная и мобильная проверка (Phase 11.2)** | Playwright + Chromium `155.0.8059.12` (`360/390/430/768/1280 px`, 3D WebGL + 2D) | **PASS (с оговоркой `BLOCKED` по hardware GPU)** | `0` перекрытий шапки, `0 px` переполнения, `0` кнопок `< 44px` на мобильных (`360/390/430`), `0` JS-исключений; подробности в `/PHASE_11_2_RUNTIME_FIX_REPORT.md` |
+| **Проверка типов TypeScript** | `npx tsc --noEmit` | **PASS (exit code 0)** | Ошибок типизации нет |
+| **Production-сборка Vite** | `npm run build` (`vite build`) | **PASS (exit code 0)** | `dist/index.html` (`1 410 B`), `dist/assets/index-BlFjGGIV.js` (`1 430 186 B`), `dist/assets/index-DKkSa4mG.css` (`45 012 B`); `0` внешних диагностических запросов |
+| **Проверка отсутствия `require(` в `src/`** | `rg -n 'require\(' src` | **PASS (0 совпадений)** | Полная совместимость с ESM-сборкой Vite |
+| **Браузерная и мобильная проверка (Phase 11.3)** | Playwright + Chromium (`1280×720`, `360×800`, `390×844`, `430×932`, `768×1024`, WebGL2 SwiftShader + 2D Fallback) | **PASS (физический Android — `NOT_TESTED`)** | `0` перекрытий шапки, `0 px` переполнения, `0` кнопок `< 44px` на смартфонах (`360/390/430`), устранён `DEF-11.3-01` (`DiagnosticsOverlay` `pointer-events-none`), `0` JS-исключений; подробности в `/PHASE_11_3_RUNTIME_VALIDATION_REPORT.md` и `/PHASE_11_3_DEFECTS_AND_REMEDIATION.md` |
 
 ---
 
